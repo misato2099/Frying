@@ -106,4 +106,4 @@ def send_tg_message(message):
     print("美股通知已發送。")
 
 if __name__ == "__main__":
-    ask_gemini_perfect_report()
+    ask_gemini_fcx_report()
