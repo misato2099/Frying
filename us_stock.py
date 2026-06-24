@@ -9,7 +9,7 @@ import numpy as np
 # 從 GitHub Secrets 安全保險箱自動讀取金鑰
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TG_CHAT_ID = "您的_TELEGRAM_CHAT_ID" # 這裡請保持填入您的純數字 Chat ID
+TG_CHAT_ID = "7594737813" # 這裡請保持填入您的純數字 Chat ID
 
 genai.configure(api_key=GEMINI_API_KEY)
 
