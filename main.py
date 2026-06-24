@@ -7,8 +7,8 @@ import requests
 import numpy as np
 
 # 2. 【請在下方填入您的關鍵金鑰】
-GEMINI_API_KEY = "GEMINI_API_KEY"
-TG_TOKEN = "TELEGRAM_BOT_TOKEN"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = "7594737813"
 
 # 設定 Google AI Studio
@@ -21,17 +21,17 @@ def ask_gemini_perfect_report():
         print("⚠️ 數據抓取失敗。")
         return
         
-    # === A. 計算布林通道 (20, 2) ===
+    # 計算布林通道 (20, 2)
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['BB_STD'] = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['MA20'] + (2 * df['BB_STD'])
     df['Lower_Band'] = df['MA20'] - (2 * df['BB_STD'])
     
-    # === B. 計算長期年線與風險門檻 ===
+    # 計算長期年線與風險門檻
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['Risk_Threshold'] = df['MA200'] * 0.95
     
-    # === C. 計算台灣標準 KD 指標 (9, 3, 3) ===
+    # 計算台灣標準 KD 指標 (9, 3, 3)
     df['Min_Low_9'] = df['Low'].rolling(window=9).min()
     df['Max_High_9'] = df['High'].rolling(window=9).max()
     df['RSV'] = ((df['Close'] - df['Min_Low_9']) / (df['Max_High_9'] - df['Min_Low_9']).replace(0, np.nan)) * 100
@@ -51,24 +51,18 @@ def ask_gemini_perfect_report():
     df['K'] = k_list
     df['D'] = d_list
 
-    # 清理初始無數據的列
     df.dropna(subset=['MA200', 'K'], inplace=True)
-    
-    # 提取最新一天的所有量化計算結果
     latest = df.iloc[-1]
     latest_date = df.index[-1].strftime('%Y-%m-%d')
     
-    # 判斷 KD 交叉與狀態
     kd_status = f"K={latest['K']:.1f} / D={latest['D']:.1f}"
     if latest['K'] > latest['D']:
         kd_status += " (K偏多黃金交叉)"
     else:
         kd_status += " (K偏空死亡交叉)"
-        
     if latest['K'] < 20: kd_status += " [低檔超賣]"
     if latest['K'] > 80: kd_status += " [高檔超買]"
 
-    # === D. 建構餵給 Gemini 的精確指令 ===
     prompt = f"""
     你是一位言簡意賅的量化交易助理。請依據以下已經由 Python 計算完畢的友達（2409）數據，**嚴格依照下方格式**輸出簡報，禁止任何延伸評論：
     
@@ -91,14 +85,9 @@ def ask_gemini_perfect_report():
         try:
             print(f"正在請求極簡診斷 (第 {attempt + 1} 次嘗試)...")
             response = model.generate_content(prompt)
-            
-            print("\n--- AI 極簡輸出 ---")
-            print(response.text)
-            print("-------------------\n")
-            
+            print("Gemini 診斷成功，準備調用 Telegram API...")
             send_tg_message(response.text)
             return
-            
         except google_exceptions.ServiceUnavailable:
             print(f"⚠️ Google 伺服器忙碌中 (503)。")
             if attempt < max_retries - 1:
@@ -110,14 +99,19 @@ def ask_gemini_perfect_report():
             break
 
 def send_tg_message(message):
-    if not TG_TOKEN or "您的" in TG_TOKEN:
-        print("提示：未偵測到正確的 Telegram 設定。")
+    print(f"除錯資訊：偵測到的 Token 長度 = {len(TG_TOKEN) if TG_TOKEN else 0}, Chat ID = {TG_CHAT_ID}")
+    if not TG_TOKEN or "您的" in TG_CHAT_ID:
+        print("❌ 錯誤：Telegram 金鑰或 Chat ID 未正確載入，請檢查 GitHub Secrets 或程式碼第14行！")
         return
+        
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     res = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message})
+    
     if res.status_code == 200:
         print("🎉 成功！極簡數據報告已發送至手機。")
     else:
-        print(f"❌ 發送失敗，錯誤碼: {res.status_code}")
+        print(f"❌ 發送失敗，Telegram 伺服器回應碼: {res.status_code}")
+        print(f"❌ 錯誤原因: {res.text}")
 
-ask_gemini_perfect_report()
+if __name__ == "__main__":
+    ask_gemini_perfect_report()
