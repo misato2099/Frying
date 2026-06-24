@@ -1,5 +1,3 @@
-!pip install -q yfinance google-generativeai requests pandas numpy
-
 import os
 import time
 import yfinance as yf
