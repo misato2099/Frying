@@ -2,7 +2,7 @@ name: US Stock Analyzer (FCX)
 
 on:
   schedule:
-    - cron: '0 13 * * 1-5' # 台灣時間 21:00
+    - cron: '0 10 * * 1-5' # 台灣時間 21:00
   workflow_dispatch:
 
 jobs:
