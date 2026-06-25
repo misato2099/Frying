@@ -2,7 +2,7 @@ name: TW Stock Analyzer (AUO)
 
 on:
   schedule:
-    - cron: '30 6 * * 1-5' # 台灣時間 14:30
+    - cron: '0 5 * * 1-5' # 台灣時間 13:00
   workflow_dispatch:
 
 jobs:
