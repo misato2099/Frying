@@ -1,0 +1,16 @@
+{
+  "tickers": {
+    "2409.TW": {"name": "友達光電", "currency": "TWD"},
+    "FCX": {"name": "自由港麥克莫蘭", "currency": "USD"}
+  },
+  "history_period": "1y",
+  "bollinger_window": 20,
+  "bollinger_std": 2.0,
+  "bollinger_ddof": 0,
+  "kd_window": 9,
+  "kd_alpha": 0.3333333333333333,
+  "kd_initial": 50.0,
+  "overbought": 80.0,
+  "oversold": 20.0,
+  "timezone": "Asia/Taipei"
+}
