@@ -2,8 +2,8 @@ name: TW Stock Analyzer (AUO)
 
 on:
   schedule:
-    # GitHub Actions cron 使用 UTC
-    # 06:10 UTC = 台灣時間 14:10，避開 13:30 收盤後資料尚未更新完成的時間
+    # GitHub cron 使用 UTC
+    # 06:10 UTC = 台灣時間 14:10
     - cron: "10 6 * * 1-5"
 
   workflow_dispatch:
@@ -27,13 +27,23 @@ jobs:
       - name: 設定 Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: "pip"
 
       - name: 安裝套件
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance google-generativeai requests pandas numpy
+          pip install --upgrade \
+            yfinance \
+            google-genai \
+            requests \
+            pandas \
+            numpy
+
+      - name: 顯示套件版本
+        run: |
+          python --version
+          pip show yfinance google-genai pandas numpy requests
 
       - name: 執行台股分析
         env:
@@ -41,4 +51,13 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python tw_stock.py
+        run: python -u tw_stock.py
+
+      - name: 上傳計算明細
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auo-calculation-${{ github.run_id }}
+          path: tw_stock_calculation.csv
+          if-no-files-found: ignore
+          retention-days: 14
