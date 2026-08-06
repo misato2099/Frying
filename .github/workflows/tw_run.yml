@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tw-stock-analyzer-auo
+  group: tw-stock-analyzer-友達
   cancel-in-progress: false
 
 jobs:
