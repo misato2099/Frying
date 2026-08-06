@@ -2,21 +2,43 @@ name: TW Stock Analyzer (AUO)
 
 on:
   schedule:
-    - cron: '0 5 * * 1-5' # 台灣時間 13:00
+    # GitHub Actions cron 使用 UTC
+    # 06:10 UTC = 台灣時間 14:10，避開 13:30 收盤後資料尚未更新完成的時間
+    - cron: "10 6 * * 1-5"
+
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tw-stock-analyzer-auo
+  cancel-in-progress: false
 
 jobs:
   run-tw-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    - name: 安裝套件
-      run: pip install yfinance google-generativeai requests pandas numpy
-    - name: 執行台股分析
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      run: python tw_stock.py # 關鍵：指定執行台股檔案
+      - name: 下載 Repository
+        uses: actions/checkout@v4
+
+      - name: 設定 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: 安裝套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance google-generativeai requests pandas numpy
+
+      - name: 執行台股分析
+        env:
+          TZ: Asia/Taipei
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tw_stock.py
