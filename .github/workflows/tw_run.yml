@@ -43,7 +43,7 @@ jobs:
       - name: 顯示套件版本
         run: |
           python --version
-          pip show yfinance google-genai pandas numpy requests
+          pip show yfinance google-genai pandas numpy requests scipy
 
       - name: 執行台股分析
         env:
