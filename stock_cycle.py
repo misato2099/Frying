@@ -23,6 +23,34 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
+    "6285.TW": {
+        "name": "啟碁",
+        "short_name": "啟碁",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
+    "2327.TW": {
+        "name": "國巨",
+        "short_name": "國巨",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
+    "6451.TW": {
+        "name": "訊芯-KY",
+        "short_name": "訊芯-KY",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
+    "3081.TWO": {
+        "name": "聯亞",
+        "short_name": "聯亞",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
     "FCX": {
         "name": "自由港麥克莫蘭",
         "short_name": "FCX",
@@ -30,6 +58,20 @@ STOCKS = {
         "currency_label": "美元",
         "market": "美國",
     },
+    "MRNA": {
+        "name": "莫德納",
+        "short_name": "MRNA",
+        "currency": "USD",
+        "currency_label": "美元",
+        "market": "美國",
+    },
+    "SPCX": {
+        "name": "SpaceX",
+        "short_name": "SPCX",
+        "currency": "USD",
+        "currency_label": "美元",
+        "market": "美國",
+    }
 }
 
 HISTORY_PERIOD = "2y"
