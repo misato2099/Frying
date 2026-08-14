@@ -673,18 +673,18 @@ def get_bollinger_status(latest):
 
 
 def get_technical_conclusion(latest):
-    close = latest["Close"]
-    middle = latest["MA20"]
-    upper = latest["Upper_Band"]
-    lower = latest["Lower_Band"]
+    close = float(latest["Close"])
+    middle = float(latest["MA20"])
+    upper = float(latest["Upper_Band"])
+    lower = float(latest["Lower_Band"])
 
-    k_value = latest["K"]
-    d_value = latest["D"]
+    k_value = float(latest["K"])
+    d_value = float(latest["D"])
 
     risk_threshold = latest["Risk_Threshold"]
 
-    # 檢核長天期資料是否存在
-    if pd.notna(risk_threshold) and close < risk_threshold:
+    # 檢核長天期資料是否存在，改用 pd.isna 以確保相容性
+    if not pd.isna(risk_threshold) and close < float(risk_threshold):
         return (
             "🚨 收盤低於200日均線的95%參考值，"
             "長期價格結構偏弱，宜優先關注風險控管。"
@@ -701,7 +701,6 @@ def get_technical_conclusion(latest):
             "短線乖離及震盪風險上升。"
         )
 
-    # 新增：考量 KD 小於等於 20 的超賣情況
     if (
         close < lower
         and k_value < d_value
@@ -794,6 +793,13 @@ def build_stock_report(
         stock_info["currency_label"]
     )
 
+    ma200_val = latest['MA200']
+    risk_threshold_val = latest['Risk_Threshold']
+
+    # 強化空值與型別防呆
+    ma200_str = f"{float(ma200_val):.2f}" if not pd.isna(ma200_val) else "資料不足"
+    risk_threshold_str = f"{float(risk_threshold_val):.2f}" if not pd.isna(risk_threshold_val) else "資料不足"
+
     report = f"""【{stock_info['name']}｜{ticker}】
 📅 交易日期：{latest_date}
 💰 收盤：{latest['Close']:.2f} {currency_label}
@@ -812,8 +818,8 @@ def build_stock_report(
 {get_kd_status(latest)}
 
 🛡️ 長期風險參考
-200日均線：{latest['MA200']:.2f}
-200日均線95%參考值：{latest['Risk_Threshold']:.2f}
+200日均線：{ma200_str}
+200日均線95%參考值：{risk_threshold_str}
 
 💡 技術觀察
 {get_technical_conclusion(latest)}"""
