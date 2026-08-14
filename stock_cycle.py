@@ -1306,7 +1306,7 @@ def run_analysis():
         )
 
     combined_report = (
-        "📋 每日量化技術摘要\n\n"
+        "📋 每日量化技術摘要"
         + "\n\n"
         + "\n\n━━━━━━━━━━━━━\n\n".join(
             stock_reports
