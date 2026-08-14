@@ -90,6 +90,11 @@ KD_WINDOW = 9
 KD_ALPHA = 1 / 3
 KD_INITIAL = 50.0
 
+# MACD
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+
 # Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -522,6 +527,29 @@ def calculate_indicators(df, ticker):
     df["D"] = d_values
 
     # --------------------------------------------------------
+    # MACD
+    # --------------------------------------------------------
+
+    df["EMA_Fast"] = df["Close"].ewm(
+        span=MACD_FAST, 
+        adjust=False
+    ).mean()
+
+    df["EMA_Slow"] = df["Close"].ewm(
+        span=MACD_SLOW, 
+        adjust=False
+    ).mean()
+
+    df["DIF"] = df["EMA_Fast"] - df["EMA_Slow"]
+
+    df["MACD"] = df["DIF"].ewm(
+        span=MACD_SIGNAL, 
+        adjust=False
+    ).mean()
+
+    df["OSC"] = df["DIF"] - df["MACD"]
+    
+    # --------------------------------------------------------
     # 交叉
     # --------------------------------------------------------
 
@@ -535,17 +563,20 @@ def calculate_indicators(df, ticker):
         & (df["K"].shift(1) >= df["D"].shift(1))
     )
 
-    required_columns = [
-            "MA20",
-            "BB_STD",
-            "Upper_Band",
-            "Lower_Band",
-            "BB_Width_Pct",
-            "BB_Position_Pct",
-            "RSV",
-            "K",
-            "D",
-        ]
+required_columns = [
+        "MA20",
+        "BB_STD",
+        "Upper_Band",
+        "Lower_Band",
+        "BB_Width_Pct",
+        "BB_Position_Pct",
+        "RSV",
+        "K",
+        "D",
+        "DIF",
+        "MACD",
+        "OSC"
+    ]
 
     df = df.dropna(
         subset=required_columns
@@ -567,17 +598,20 @@ def calculate_indicators(df, ticker):
 
 def validate_latest_indicators(latest, ticker):
     columns = [
-            "Close",
-            "MA20",
-            "BB_STD",
-            "Upper_Band",
-            "Lower_Band",
-            "BB_Width_Pct",
-            "BB_Position_Pct",
-            "RSV",
-            "K",
-            "D",
-        ]
+        "Close",
+        "MA20",
+        "BB_STD",
+        "Upper_Band",
+        "Lower_Band",
+        "BB_Width_Pct",
+        "BB_Position_Pct",
+        "RSV",
+        "K",
+        "D",
+        "DIF",
+        "MACD",
+        "OSC"
+    ]
 
     for column in columns:
         value = latest[column]
@@ -641,6 +675,45 @@ def get_kd_status(latest):
 
     return status
 
+def get_macd_status(latest, previous):
+    dif = float(latest["DIF"])
+    macd = float(latest["MACD"])
+    osc = float(latest["OSC"])
+    prev_osc = float(previous["OSC"])
+    prev_dif = float(previous["DIF"])
+    prev_macd = float(previous["MACD"])
+
+    status = (
+        f"DIF {dif:.2f}｜"
+        f"MACD {macd:.2f}｜"
+        f"OSC {osc:.2f}"
+    )
+
+    # 判斷交叉
+    if dif > macd and prev_dif <= prev_macd:
+        status += "｜今日黃金交叉"
+    elif dif < macd and prev_dif >= prev_macd:
+        status += "｜今日死亡交叉"
+    elif dif > 0 and macd > 0:
+        status += "｜雙線零軸之上"
+    elif dif < 0 and macd < 0:
+        status += "｜雙線零軸之下"
+    else:
+        status += "｜多空交戰區"
+
+    # 判斷動能柱狀體變化
+    if osc > 0:
+        if osc > prev_osc:
+            status += "｜紅柱放大，多方動能增強"
+        else:
+            status += "｜紅柱縮小，多方動能減弱"
+    elif osc < 0:
+        if osc < prev_osc:
+            status += "｜綠柱放大，空方動能增強"
+        else:
+            status += "｜綠柱縮小，空方動能減弱"
+
+    return status
 
 def get_bollinger_status(latest):
     close = latest["Close"]
@@ -796,7 +869,6 @@ def build_stock_report(
     ma200_val = latest['MA200']
     risk_threshold_val = latest['Risk_Threshold']
 
-    # 強化空值與型別防呆
     ma200_str = f"{float(ma200_val):.2f}" if not pd.isna(ma200_val) else "資料不足"
     risk_threshold_str = f"{float(risk_threshold_val):.2f}" if not pd.isna(risk_threshold_val) else "資料不足"
 
@@ -817,6 +889,9 @@ def build_stock_report(
 📈 KD指標
 {get_kd_status(latest)}
 
+📉 MACD指標
+{get_macd_status(latest, previous)}
+
 🛡️ 長期風險參考
 200日均線：{ma200_str}
 200日均線95%參考值：{risk_threshold_str}
@@ -826,6 +901,62 @@ def build_stock_report(
 
     return report
 
+
+def save_calculation_result(
+    ticker,
+    df,
+):
+    # 修正：加入 DIF, MACD, OSC 至匯出欄位清單
+    output_columns = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "MA20",
+        "BB_STD",
+        "Upper_Band",
+        "Lower_Band",
+        "BB_Width_Pct",
+        "BB_Position_Pct",
+        "MA200",
+        "Risk_Threshold",
+        "Min_Low_9",
+        "Max_High_9",
+        "RSV",
+        "K",
+        "D",
+        "DIF",
+        "MACD",
+        "OSC",
+        "Golden_Cross",
+        "Death_Cross",
+    ]
+
+    output_df = (
+        df[output_columns]
+        .tail(60)
+        .copy()
+    )
+
+    safe_ticker = ticker.replace(".", "_")
+
+    filename = (
+        f"{safe_ticker}_calculation.csv"
+    )
+
+    output_df.to_csv(
+        filename,
+        encoding="utf-8-sig",
+        index_label="Date",
+        float_format="%.6f",
+    )
+
+    logger.info(
+        "%s 計算明細已儲存：%s",
+        ticker,
+        filename,
+    )
 
 # ============================================================
 # Gemini
