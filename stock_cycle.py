@@ -563,20 +563,20 @@ def calculate_indicators(df, ticker):
         & (df["K"].shift(1) >= df["D"].shift(1))
     )
 
-required_columns = [
-        "MA20",
-        "BB_STD",
-        "Upper_Band",
-        "Lower_Band",
-        "BB_Width_Pct",
-        "BB_Position_Pct",
-        "RSV",
-        "K",
-        "D",
-        "DIF",
-        "MACD",
-        "OSC"
-    ]
+    required_columns = [
+            "MA20",
+            "BB_STD",
+            "Upper_Band",
+            "Lower_Band",
+            "BB_Width_Pct",
+            "BB_Position_Pct",
+            "RSV",
+            "K",
+            "D",
+            "DIF",
+            "MACD",
+            "OSC"
+        ]
 
     df = df.dropna(
         subset=required_columns
