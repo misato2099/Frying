@@ -340,9 +340,8 @@ def validate_stock_data(df, ticker):
     """
     驗證資料量及 OHLC 邏輯。
     """
-
+    # 修正：移除 MA_LONG_WINDOW 的強制限制，僅確保短天期指標能計算
     minimum_rows = max(
-        MA_LONG_WINDOW,
         BB_WINDOW,
         KD_WINDOW,
     ) + 10
@@ -536,15 +535,13 @@ def calculate_indicators(df, ticker):
         & (df["K"].shift(1) >= df["D"].shift(1))
     )
 
-    required_columns = [
+required_columns = [
         "MA20",
         "BB_STD",
         "Upper_Band",
         "Lower_Band",
         "BB_Width_Pct",
         "BB_Position_Pct",
-        "MA200",
-        "Risk_Threshold",
         "RSV",
         "K",
         "D",
@@ -569,7 +566,7 @@ def calculate_indicators(df, ticker):
 
 
 def validate_latest_indicators(latest, ticker):
-    columns = [
+columns = [
         "Close",
         "MA20",
         "BB_STD",
@@ -577,8 +574,6 @@ def validate_latest_indicators(latest, ticker):
         "Lower_Band",
         "BB_Width_Pct",
         "BB_Position_Pct",
-        "MA200",
-        "Risk_Threshold",
         "RSV",
         "K",
         "D",
@@ -688,7 +683,8 @@ def get_technical_conclusion(latest):
 
     risk_threshold = latest["Risk_Threshold"]
 
-    if close < risk_threshold:
+    # 檢核長天期資料是否存在
+    if pd.notna(risk_threshold) and close < risk_threshold:
         return (
             "🚨 收盤低於200日均線的95%參考值，"
             "長期價格結構偏弱，宜優先關注風險控管。"
@@ -703,6 +699,18 @@ def get_technical_conclusion(latest):
             "🟠 價格突破布林上軌且KD偏多，"
             "但K值已進入超買區，"
             "短線乖離及震盪風險上升。"
+        )
+
+    # 新增：考量 KD 小於等於 20 的超賣情況
+    if (
+        close < lower
+        and k_value < d_value
+        and k_value <= 20
+    ):
+        return (
+            "🔵 價格跌破布林下軌且KD偏空，"
+            "但K值已進入超賣區，"
+            "反映短線可能存在超跌現象，需留意技術性反彈契機。"
         )
 
     if (
@@ -900,7 +908,13 @@ def polish_combined_report_with_gemini(
 
             required_phrases = [
                 "友達",
+                "啟碁",
+                "國巨",
+                "訊芯-KY",
+                "聯亞",
                 "FCX",
+                "莫德納",
+                "SPACX",
                 "布林",
                 "KD",
                 "不構成投資建議",
@@ -1157,7 +1171,7 @@ def run_analysis():
     combined_report = (
         "📋 每日量化技術摘要\n\n"
         + "\n\n"
-        + "\n\n━━━━━━━━━━━━━━\n\n".join(
+        + "\n\n━━━━━━━━━━━━━\n\n".join(
             stock_reports
         )
     )
