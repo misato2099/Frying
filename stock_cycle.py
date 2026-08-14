@@ -166,7 +166,7 @@ def download_stock_data(ticker):
                 auto_adjust=False,
                 back_adjust=False,
                 actions=False,
-                repair=True,
+                repair=False,
                 keepna=False,
                 progress=False,
                 threads=False,
