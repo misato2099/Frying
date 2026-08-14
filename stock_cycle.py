@@ -566,18 +566,18 @@ def calculate_indicators(df, ticker):
 
 
 def validate_latest_indicators(latest, ticker):
-columns = [
-        "Close",
-        "MA20",
-        "BB_STD",
-        "Upper_Band",
-        "Lower_Band",
-        "BB_Width_Pct",
-        "BB_Position_Pct",
-        "RSV",
-        "K",
-        "D",
-    ]
+    columns = [
+            "Close",
+            "MA20",
+            "BB_STD",
+            "Upper_Band",
+            "Lower_Band",
+            "BB_Width_Pct",
+            "BB_Position_Pct",
+            "RSV",
+            "K",
+            "D",
+        ]
 
     for column in columns:
         value = latest[column]
