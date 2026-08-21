@@ -904,7 +904,7 @@ def build_stock_report(
     atr_str = f"{float(atr_val):.2f}" if not pd.isna(atr_val) else "資料不足"
     regime_str = "觸發" if bool(latest.get("Breakout_Regime", False)) else "未觸發"
 
-report = f"""【{stock_info['name']}｜{ticker}】
+    report = f"""【{stock_info['name']}｜{ticker}】
 📅 交易日期：{latest_date}
 💰 收盤：{latest['Close']:.2f} {currency_label}
 📉 漲跌：{daily_change:+.2f} {currency_label}（{daily_change_pct:+.2f}%）
