@@ -1,4 +1,4 @@
-# 2409.TW 與 FCX 每日技術摘要
+# 每日技術摘要
 
 此專案使用未調整 OHLC 計算 20 日布林通道與 9 日 KD，並透過 Telegram 或 LINE Messaging API 推播。
 
