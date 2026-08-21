@@ -550,6 +550,44 @@ def calculate_indicators(df, ticker):
     df["OSC"] = df["DIF"] - df["MACD"]
     
     # --------------------------------------------------------
+    # 波動率與結構性斷裂檢測 (ATR & Breakout Regime)
+    # --------------------------------------------------------
+
+    df["Prev_Close"] = df["Close"].shift(1)
+    
+    # 計算真實波動區間 (TR)
+    df["TR"] = np.maximum(
+        df["High"] - df["Low"],
+        np.maximum(
+            (df["High"] - df["Prev_Close"]).abs(),
+            (df["Low"] - df["Prev_Close"]).abs()
+        )
+    )
+    
+    # 14日平均真實波動 (ATR)
+    df["ATR"] = df["TR"].rolling(
+        window=14, 
+        min_periods=14
+    ).mean()
+
+    # 爆量檢測：成交量大於 20 日均量的 2.5 倍
+    df["Vol_MA20"] = df["Volume"].rolling(
+        window=20, 
+        min_periods=20
+    ).mean()
+    df["Vol_Spike"] = df["Volume"] > (df["Vol_MA20"] * 2.5)
+
+    # 異常跳空檢測：缺口大於 1 倍昨日 ATR
+    df["Gap_Up"] = (df["Low"] - df["High"].shift(1)) > df["ATR"].shift(1)
+    df["Gap_Down"] = (df["Low"].shift(1) - df["High"]) > df["ATR"].shift(1)
+
+    # 狀態標籤：同時滿足爆量與跳空
+    df["Breakout_Regime"] = df["Vol_Spike"] & (df["Gap_Up"] | df["Gap_Down"])
+
+    # --- 原有的 required_columns 與 dropna 區塊 ---
+    # 請記得在 required_columns 列表加入 "ATR", "Breakout_Regime"
+    
+    # --------------------------------------------------------
     # 交叉
     # --------------------------------------------------------
 
@@ -575,6 +613,9 @@ def calculate_indicators(df, ticker):
             "D",
             "DIF",
             "MACD",
+            "ATR",
+            "Vol_Spike",
+            "Breakout_Regime",
             "OSC"
         ]
 
@@ -610,6 +651,9 @@ def validate_latest_indicators(latest, ticker):
         "D",
         "DIF",
         "MACD",
+        "ATR",
+        "Vol_Spike",
+        "Breakout_Regime",
         "OSC"
     ]
 
@@ -750,82 +794,66 @@ def get_technical_conclusion(latest):
     middle = float(latest["MA20"])
     upper = float(latest["Upper_Band"])
     lower = float(latest["Lower_Band"])
-
     k_value = float(latest["K"])
     d_value = float(latest["D"])
-
     risk_threshold = latest["Risk_Threshold"]
 
-    # 檢核長天期資料是否存在，改用 pd.isna 以確保相容性
+    # 擷取突破狀態參數
+    is_breakout = bool(latest.get("Breakout_Regime", False))
+    gap_up = bool(latest.get("Gap_Up", False))
+    gap_down = bool(latest.get("Gap_Down", False))
+
+    # 1. 優先檢驗結構性斷裂狀態
+    if is_breakout:
+        if gap_up:
+            return (
+                "🔥 【結構性突破】出現爆量與顯著向上跳空！\n"
+                "市場定價邏輯可能已轉變，傳統震盪指標易出現高檔鈍化。\n"
+                "技術面宜轉為趨勢跟隨，並以近期跳空缺口或 ATR 動態防守點作為評估參考。"
+            )
+        elif gap_down:
+            return (
+                "⚠️ 【結構性斷裂】出現爆量與顯著向下跳空！\n"
+                "底部支撐結構可能失效，需留意超賣指標失真風險，\n"
+                "應優先審視基本面變數，並嚴格執行風險價值控管機制。"
+            )
+
+    # 2. 檢驗長期風險參考
     if not pd.isna(risk_threshold) and close < float(risk_threshold):
         return (
             "🚨 收盤低於200日均線的95%參考值，"
             "長期價格結構偏弱，宜優先關注風險控管。"
         )
 
-    if (
-        close > upper
-        and k_value > d_value
-        and k_value >= 80
-    ):
+    # 3. 常規技術訊號判定
+    if close > upper and k_value > d_value and k_value >= 80:
         return (
             "🟠 價格突破布林上軌且KD偏多，"
-            "但K值已進入超買區，"
-            "短線乖離及震盪風險上升。"
+            "但K值已進入超買區，短線乖離及震盪風險上升。"
         )
 
-    if (
-        close < lower
-        and k_value < d_value
-        and k_value <= 20
-    ):
+    if close < lower and k_value < d_value and k_value <= 20:
         return (
             "🔵 價格跌破布林下軌且KD偏空，"
-            "但K值已進入超賣區，"
-            "反映短線可能存在超跌現象，需留意技術性反彈契機。"
+            "但K值已進入超賣區，反映短線可能存在超跌現象，需留意技術性反彈契機。"
         )
 
-    if (
-        close >= middle
-        and k_value > d_value
-    ):
-        return (
-            "🟢 收盤位於布林中軌之上，"
-            "且K高於D，短線多方動能占優。"
-        )
+    if close >= middle and k_value > d_value:
+        return "🟢 收盤位於布林中軌之上，且K高於D，短線多方動能占優。"
 
-    if (
-        close < lower
-        and k_value < d_value
-    ):
-        return (
-            "🔴 收盤低於布林下軌，"
-            "且K低於D，技術結構偏弱。"
-        )
+    if close < lower and k_value < d_value:
+        return "🔴 收盤低於布林下軌，且K低於D，技術結構偏弱。"
 
-    if (
-        close < middle
-        and k_value > d_value
-    ):
+    if close < middle and k_value > d_value:
         return (
-            "🟡 KD動能改善，"
-            "但收盤仍低於布林中軌，"
+            "🟡 KD動能改善，但收盤仍低於布林中軌，"
             "較接近弱勢反彈，尚未確認趨勢轉強。"
         )
 
-    if (
-        close >= middle
-        and k_value < d_value
-    ):
-        return (
-            "🟡 價格仍在布林中軌之上，"
-            "但KD動能轉弱，留意短線整理。"
-        )
+    if close >= middle and k_value < d_value:
+        return "🟡 價格仍在布林中軌之上，但KD動能轉弱，留意短線整理。"
 
-    return (
-        "⚪ 布林通道與KD訊號分歧，"
-        "目前以中性整理看待。"
-    )
+    return "⚪ 布林通道與KD訊號分歧，目前以中性整理看待。"
 
 
 # ============================================================
@@ -872,7 +900,11 @@ def build_stock_report(
     ma200_str = f"{float(ma200_val):.2f}" if not pd.isna(ma200_val) else "資料不足"
     risk_threshold_str = f"{float(risk_threshold_val):.2f}" if not pd.isna(risk_threshold_val) else "資料不足"
 
-    report = f"""【{stock_info['name']}｜{ticker}】
+    atr_val = latest.get('ATR', np.nan)
+    atr_str = f"{float(atr_val):.2f}" if not pd.isna(atr_val) else "資料不足"
+    regime_str = "觸發" if bool(latest.get("Breakout_Regime", False)) else "未觸發"
+
+report = f"""【{stock_info['name']}｜{ticker}】
 📅 交易日期：{latest_date}
 💰 收盤：{latest['Close']:.2f} {currency_label}
 📉 漲跌：{daily_change:+.2f} {currency_label}（{daily_change_pct:+.2f}%）
@@ -892,15 +924,16 @@ def build_stock_report(
 📉 MACD指標
 {get_macd_status(latest, previous)}
 
-🛡️ 長期風險參考
+🛡️ 長期風險與波動率參考
 200日均線：{ma200_str}
 200日均線95%參考值：{risk_threshold_str}
+14日真實波幅 (ATR)：{atr_str}
+結構斷裂警示：{regime_str}
 
 💡 技術觀察
 {get_technical_conclusion(latest)}"""
 
     return report
-
 
 def save_calculation_result(
     ticker,
@@ -1202,6 +1235,9 @@ def save_calculation_result(
         "D",
         "Golden_Cross",
         "Death_Cross",
+        "ATR",
+        "Vol_Spike",
+        "Breakout_Regime"
     ]
 
     output_df = (
