@@ -1,22 +1,74 @@
-name: US Stock Analyzer (FCX)
+name: 每日股票量化技術分析
 
 on:
   schedule:
-    - cron: '0 10 * * 1-5' # 台灣時間 21:00
+    # 週一至週五 UTC 00:00 (台灣時間 08:00) 執行台股
+    - cron: '0 0 * * 1-5'
+    # 週一至週五 UTC 13:00 (台灣時間 21:00) 執行美股
+    - cron: '0 13 * * 1-5'
+  
+  # 支援在 GitHub 網頁手動點擊「Run workflow」隨時測試
   workflow_dispatch:
+    inputs:
+      market:
+        description: '選擇要分析的市場'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - tw
+          - us
+          - all
+      force:
+        description: '是否強制執行（略過假日檢核）'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
-  run-us-bot:
+  run-analysis:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    - name: 安裝套件
-      run: pip install yfinance google-generativeai requests pandas numpy
-    - name: 執行美股分析
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      run: python us_stock.py # 關鍵：指定執行美股檔案
+      - name: 檢出專案代碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 判斷執行市場並啟動分析
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # 取得觸發時的 UTC 小時
+          HOUR=$(date -u +%H)
+          
+          # 預設依排程時間分流：UTC 00點(台灣08點)跑台股，UTC 13點(台灣21點)跑美股
+          TARGET_MARKET="tw"
+          if [ "$HOUR" -ge "10" ]; then
+            TARGET_MARKET="us"
+          fi
+          
+          # 若是手動點擊觸發，則使用手動選擇的市場
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TARGET_MARKET="${{ github.event.inputs.market }}"
+          fi
+
+          # 檢查是否有勾選 force
+          EXTRA_FLAGS=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            EXTRA_FLAGS="--force"
+          fi
+
+          echo "🚀 開始執行分析市場: $TARGET_MARKET (UTC Hour: $HOUR)"
+          python stock_cycle.py --market "$TARGET_MARKET" $EXTRA_FLAGS
