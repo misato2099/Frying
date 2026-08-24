@@ -1,6 +1,19 @@
 import os
+import sys
 import time
 import logging
+import argparse
+import datetime
+import urllib3
+import pytz
+from bs4 import BeautifulSoup
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8-sig")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8-sig")
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import numpy as np
 import pandas as pd
@@ -17,7 +30,7 @@ from google.genai import errors as genai_errors
 
 STOCKS = {
     "2409.TW": {
-        "name": "友達光電",
+        "name": "友達",
         "short_name": "2409.TW",
         "currency": "TWD",
         "currency_label": "元",
@@ -101,6 +114,28 @@ KD_INITIAL = 50.0
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
+
+def _load_env_file():
+    env_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.expanduser("~/.env"),
+        ".env",
+    ]
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8-sig") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip().strip("'").strip('"')
+                            if k and not os.environ.get(k):
+                                os.environ[k] = v
+            except Exception:
+                pass
+
+_load_env_file()
 
 # Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -946,7 +981,6 @@ def save_calculation_result(
     ticker,
     df,
 ):
-    # 修正：加入 DIF, MACD, OSC 至匯出欄位清單
     output_columns = [
         "Open",
         "High",
@@ -971,6 +1005,9 @@ def save_calculation_result(
         "OSC",
         "Golden_Cross",
         "Death_Cross",
+        "ATR",
+        "Vol_Spike",
+        "Breakout_Regime",
     ]
 
     output_df = (
@@ -1004,6 +1041,7 @@ def save_calculation_result(
 
 def polish_combined_report_with_gemini(
     base_report,
+    active_stocks=None,
 ):
     """
     Gemini 僅整理文字。
@@ -1021,15 +1059,14 @@ def polish_combined_report_with_gemini(
     prompt = f"""
 你是一位繁體中文量化報告編輯。
 
-請整理下方已由 Python 完成計算的
-友達光電與自由港麥克莫蘭技術摘要。
+請整理下方已由 Python 完成計算的各檔股票技術摘要。
 
 嚴格規則：
 1. 不得修改任何日期或數值。
 2. 不得重新計算指標。
 3. 不得增加買進、賣出或持有指令。
 4. 不得增加目標價、停損價或報酬保證。
-5. 必須保留兩檔股票各自的交易日期。
+5. 必須保留各檔股票各自的交易日期。
 6. 必須保留風險聲明。
 7. 僅改善文字流暢度及排版。
 8. 使用台灣繁體中文。
@@ -1056,7 +1093,7 @@ def polish_combined_report_with_gemini(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info(
-                "正在請求 Gemini 整理雙股報告，"
+                "正在請求 Gemini 整理技術報告，"
                 "第 %d 次嘗試",
                 attempt,
             )
@@ -1083,19 +1120,13 @@ def polish_combined_report_with_gemini(
                 response_text.strip()
             )
 
-            required_phrases = [
-                "友達",
-                "啟碁",
-                "國巨",
-                "訊芯-KY",
-                "聯亞",
-                "FCX",
-                "莫德納",
-                "SPACX",
-                "布林",
-                "KD",
-                "不構成投資建議",
-            ]
+            if active_stocks:
+                required_phrases = [
+                    stock_info["name"][:2]
+                    for stock_info in active_stocks.values()
+                ] + ["布林", "KD", "不構成投資建議"]
+            else:
+                required_phrases = ["布林", "KD", "不構成投資建議"]
 
             missing_phrases = [
                 phrase
@@ -1113,7 +1144,7 @@ def polish_combined_report_with_gemini(
                 return base_report
 
             logger.info(
-                "Gemini 雙股報告整理成功"
+                "Gemini 技術報告整理成功"
             )
 
             return response_text
@@ -1166,15 +1197,11 @@ def polish_combined_report_with_gemini(
 # ============================================================
 
 def send_tg_message(message):
-    if not TG_TOKEN:
-        raise ValueError(
-            "未設定 TELEGRAM_BOT_TOKEN"
+    if not TG_TOKEN or not TG_CHAT_ID:
+        logger.info(
+            "未設定 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，略過 Telegram 發送"
         )
-
-    if not TG_CHAT_ID:
-        raise ValueError(
-            "未設定 TELEGRAM_CHAT_ID"
-        )
+        return
 
     url = (
         f"https://api.telegram.org/"
@@ -1209,85 +1236,354 @@ def send_tg_message(message):
         )
 
     logger.info(
-        "Telegram 雙股技術摘要已成功發送"
+        "Telegram 技術摘要已成功發送"
     )
 
 
 # ============================================================
-# 儲存明細
+# 交易日檢核（國定假日、週末、天災停市）
 # ============================================================
 
-def save_calculation_result(
-    ticker,
-    df,
-):
-    output_columns = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume",
-        "MA20",
-        "BB_STD",
-        "Upper_Band",
-        "Lower_Band",
-        "BB_Width_Pct",
-        "BB_Position_Pct",
-        "MA200",
-        "Risk_Threshold",
-        "Min_Low_9",
-        "Max_High_9",
-        "RSV",
-        "K",
-        "D",
-        "Golden_Cross",
-        "Death_Cross",
-        "ATR",
-        "Vol_Spike",
-        "Breakout_Regime"
-    ]
+def get_easter_date(year: int) -> datetime.date:
+    """計算指定年份的復活節週日 (Gregorian Easter)"""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime.date(year, month, day)
 
-    output_df = (
-        df[output_columns]
-        .tail(60)
-        .copy()
-    )
 
-    safe_ticker = ticker.replace(".", "_")
+def get_us_market_holidays(year: int) -> dict[datetime.date, str]:
+    """計算美股 (NYSE / NASDAQ) 全年法定休市日"""
+    holidays = {}
 
-    filename = (
-        f"{safe_ticker}_calculation.csv"
-    )
+    # 1. 元旦 (New Year's Day)
+    nyd = datetime.date(year, 1, 1)
+    if nyd.weekday() == 6:  # 週日 -> 週一補假
+        holidays[datetime.date(year, 1, 2)] = "New Year's Day (Observed)"
+    elif nyd.weekday() != 5:  # 週六不提前（NYSE慣例）
+        holidays[nyd] = "New Year's Day"
 
-    output_df.to_csv(
-        filename,
-        encoding="utf-8-sig",
-        index_label="Date",
-        float_format="%.6f",
-    )
+    # 2. 馬丁路德金紀念日 (Martin Luther King, Jr. Day - 1月第3個週一)
+    jan1 = datetime.date(year, 1, 1)
+    first_mon_jan = jan1 + datetime.timedelta(days=(0 - jan1.weekday() + 7) % 7)
+    holidays[first_mon_jan + datetime.timedelta(weeks=2)] = "Martin Luther King, Jr. Day"
 
-    logger.info(
-        "%s 計算明細已儲存：%s",
-        ticker,
-        filename,
-    )
+    # 3. 華盛頓誕辰 / 總統日 (Presidents' Day - 2月第3個週一)
+    feb1 = datetime.date(year, 2, 1)
+    first_mon_feb = feb1 + datetime.timedelta(days=(0 - feb1.weekday() + 7) % 7)
+    holidays[first_mon_feb + datetime.timedelta(weeks=2)] = "Presidents' Day"
+
+    # 4. 耶穌受難日 (Good Friday - 復活節前2天)
+    good_friday = get_easter_date(year) - datetime.timedelta(days=2)
+    holidays[good_friday] = "Good Friday"
+
+    # 5. 陣亡將士紀念日 (Memorial Day - 5月最後一個週一)
+    may31 = datetime.date(year, 5, 31)
+    last_mon_may = may31 - datetime.timedelta(days=(may31.weekday() - 0 + 7) % 7)
+    holidays[last_mon_may] = "Memorial Day"
+
+    # 6. 六月節全國獨立日 (Juneteenth - 6月19日)
+    june19 = datetime.date(year, 6, 19)
+    if june19.weekday() == 5:
+        holidays[datetime.date(year, 6, 18)] = "Juneteenth (Observed)"
+    elif june19.weekday() == 6:
+        holidays[datetime.date(year, 6, 20)] = "Juneteenth (Observed)"
+    else:
+        holidays[june19] = "Juneteenth National Independence Day"
+
+    # 7. 美國獨立日 (Independence Day - 7月4日)
+    july4 = datetime.date(year, 7, 4)
+    if july4.weekday() == 5:
+        holidays[datetime.date(year, 7, 3)] = "Independence Day (Observed)"
+    elif july4.weekday() == 6:
+        holidays[datetime.date(year, 7, 5)] = "Independence Day (Observed)"
+    else:
+        holidays[july4] = "Independence Day"
+
+    # 8. 勞動節 (Labor Day - 9月第1個週一)
+    sep1 = datetime.date(year, 9, 1)
+    first_mon_sep = sep1 + datetime.timedelta(days=(0 - sep1.weekday() + 7) % 7)
+    holidays[first_mon_sep] = "Labor Day"
+
+    # 9. 感恩節 (Thanksgiving Day - 11月第4個週四)
+    nov1 = datetime.date(year, 11, 1)
+    first_thu_nov = nov1 + datetime.timedelta(days=(3 - nov1.weekday() + 7) % 7)
+    holidays[first_thu_nov + datetime.timedelta(weeks=3)] = "Thanksgiving Day"
+
+    # 10. 聖誕節 (Christmas Day - 12月25日)
+    dec25 = datetime.date(year, 12, 25)
+    if dec25.weekday() == 5:
+        holidays[datetime.date(year, 12, 24)] = "Christmas Day (Observed)"
+    elif dec25.weekday() == 6:
+        holidays[datetime.date(year, 12, 26)] = "Christmas Day (Observed)"
+    else:
+        holidays[dec25] = "Christmas Day"
+
+    return holidays
+
+
+_TWSE_HOLIDAYS_CACHE = {}
+
+def parse_twse_date(date_str: str) -> datetime.date | None:
+    """解析證交所回傳的日期字串 (支援西元或民國格式)"""
+    date_str = str(date_str).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            pass
+
+    parts = date_str.replace("/", "-").split("-")
+    if len(parts) == 3 and parts[0].isdigit():
+        year = int(parts[0])
+        if year < 1900:  # 民國年
+            year += 1911
+        try:
+            return datetime.date(year, int(parts[1]), int(parts[2]))
+        except ValueError:
+            pass
+    return None
+
+
+def fetch_twse_holidays(year: int = None) -> dict[datetime.date, str]:
+    """
+    從台灣證券交易所 (TWSE) 官方 API 取得年度休市行事曆
+    """
+    global _TWSE_HOLIDAYS_CACHE
+    if year in _TWSE_HOLIDAYS_CACHE:
+        return _TWSE_HOLIDAYS_CACHE[year]
+
+    try:
+        url = "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json"
+        if year:
+            url += f"&queryYear={year}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            holidays = {}
+            for row in data.get("data", []):
+                if len(row) >= 2:
+                    date_str, name = str(row[0]).strip(), str(row[1]).strip()
+                    desc = str(row[2]).strip() if len(row) > 2 else ""
+
+                    # 過濾純粹標記開市/最後交易日的非休市項目
+                    if "開始交易" in name and "無交易" not in name and "休市" not in name and "放假" not in name:
+                        continue
+                    if "最後交易" in name and "無交易" not in name and "休市" not in name and "放假" not in name:
+                        continue
+
+                    dt = parse_twse_date(date_str)
+                    if dt:
+                        holidays[dt] = f"{name} ({desc})" if desc else name
+
+            if holidays:
+                _TWSE_HOLIDAYS_CACHE[year] = holidays
+                return holidays
+    except Exception as e:
+        logger.warning("取得證交所休市日 API 失敗: %s", repr(e))
+
+    return _TWSE_HOLIDAYS_CACHE.get(year, {})
+
+
+def check_taiwan_typhoon_closure(target_date: datetime.date) -> tuple[bool, str]:
+    """
+    檢查指定日期台灣是否因天然災害（颱風假）導致台北市停班而使證交所休市。
+    依證交所規定：台北市政府宣布停止上班即全日休市。
+    """
+    today = datetime.date.today()
+    if target_date != today:
+        return False, ""
+
+    try:
+        url = "https://www.dgpa.gov.tw/typh/daily/nds.html"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, verify=False, timeout=8)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.content, "html.parser")
+            text = soup.get_text()
+
+            for city in ["臺北市", "台北市"]:
+                if city in text:
+                    idx = text.find(city)
+                    snippet = text[idx : idx + 100]
+                    negative_keywords = ["未達停止上班", "未達停班", "照常上班", "正常上班", "未列入警戒區"]
+                    has_negative = any(neg in snippet for neg in negative_keywords)
+
+                    if ("停止上班" in snippet or "停班" in snippet) and not has_negative:
+                        return True, f"行政院人事行政總處公告【{city}】停止上班（颱風/天災全日停市）"
+    except Exception as e:
+        logger.warning("查詢人事行政總處天然災害停班公告失敗: %s", repr(e))
+
+    return False, ""
+
+
+def is_trading_day(target_date: datetime.date, market: str = "tw") -> tuple[bool, str]:
+    """
+    檢核目標日期在指定市場是否為交易日。
+    market: 'tw' (台股), 'us' (美股), 'all' (全市場)
+    回傳: (is_open: bool, reason: str)
+    """
+    weekday = target_date.weekday()
+    if weekday == 5:
+        return False, f"{target_date} 為週六（週末非交易日）"
+    if weekday == 6:
+        return False, f"{target_date} 為週日（週末非交易日）"
+
+    market_lower = market.lower()
+
+    if market_lower in ("tw", "taiwan", "台股"):
+        is_typhoon, typhoon_reason = check_taiwan_typhoon_closure(target_date)
+        if is_typhoon:
+            return False, f"{target_date} 台股休市：{typhoon_reason}"
+
+        twse_holidays = fetch_twse_holidays(target_date.year)
+        if target_date in twse_holidays:
+            return False, f"{target_date} 台股休市：{twse_holidays[target_date]}"
+
+        return True, f"{target_date} 為台股正常交易日"
+
+    elif market_lower in ("us", "usa", "美股"):
+        us_holidays = get_us_market_holidays(target_date.year)
+        if target_date in us_holidays:
+            return False, f"{target_date} 美股休市：{us_holidays[target_date]}"
+
+        return True, f"{target_date} 為美股正常交易日"
+
+    elif market_lower in ("all", "全部"):
+        tw_open, tw_reason = is_trading_day(target_date, "tw")
+        us_open, us_reason = is_trading_day(target_date, "us")
+        if not tw_open and not us_open:
+            return False, f"{target_date} 台股與美股皆休市（台股: {tw_reason}; 美股: {us_reason}）"
+
+        return True, f"{target_date} 部份或全部市場開市（台股: {'開市' if tw_open else '休市'}, 美股: {'開市' if us_open else '休市'}）"
+
+    return True, "未知市場，預設正常執行"
 
 
 # ============================================================
 # 主流程
 # ============================================================
 
-def run_analysis():
+def run_analysis(market="all", force=False):
+    if market.lower() in ("tw", "taiwan", "台股"):
+        target_stocks = {
+            k: v for k, v in STOCKS.items()
+            if v.get("market") == "台灣"
+        }
+        market_label = "台股"
+    elif market.lower() in ("us", "usa", "美股"):
+        target_stocks = {
+            k: v for k, v in STOCKS.items()
+            if v.get("market") == "美國"
+        }
+        market_label = "美股"
+    else:
+        target_stocks = STOCKS
+        market_label = "全市場"
+
     logger.info(
-        "開始執行友達與 FCX 每日技術分析"
+        "開始執行 %s 每日技術分析，共 %d 檔標的",
+        market_label,
+        len(target_stocks),
     )
+
+    # 交易日檢核
+    tw_tz = pytz.timezone("Asia/Taipei")
+    us_tz = pytz.timezone("America/New_York")
+    now_tw = datetime.datetime.now(tw_tz)
+    now_us = datetime.datetime.now(us_tz)
+
+    tw_date = now_tw.date()
+    # 若台灣已進入週一上午，而紐約尚處於週日夜間，美股目標交易日為該週一 (tw_date)
+    if now_tw.weekday() == 0 and now_us.weekday() == 6:
+        us_date = now_tw.date()
+    else:
+        us_date = now_us.date()
+
+    if not force:
+        if market.lower() in ("tw", "taiwan", "台股"):
+            is_open, reason = is_trading_day(tw_date, market="tw")
+            if not is_open:
+                logger.info(
+                    "📅 交易日檢核：今日 (%s) %s 休市／非交易日 [%s]，停止執行分析。",
+                    tw_date,
+                    market_label,
+                    reason,
+                )
+                print(
+                    f"\n📅 今日 ({tw_date}) {market_label} 為非交易日（{reason}），停止執行分析。\n",
+                    flush=True,
+                )
+                return
+            logger.info("📅 交易日檢核：今日 (%s) 為台股正常交易日", tw_date)
+
+        elif market.lower() in ("us", "usa", "美股"):
+            is_open, reason = is_trading_day(us_date, market="us")
+            if not is_open:
+                logger.info(
+                    "📅 交易日檢核：今日 (%s) %s 休市／非交易日 [%s]，停止執行分析。",
+                    us_date,
+                    market_label,
+                    reason,
+                )
+                print(
+                    f"\n📅 今日 ({us_date}) {market_label} 為非交易日（{reason}），停止執行分析。\n",
+                    flush=True,
+                )
+                return
+            logger.info("📅 交易日檢核：今日 (%s) 為美股正常交易日", us_date)
+
+        else:
+            tw_open, tw_reason = is_trading_day(tw_date, market="tw")
+            us_open, us_reason = is_trading_day(us_date, market="us")
+
+            if not tw_open and not us_open:
+                logger.info(
+                    "📅 交易日檢核：今日台股 (%s: %s) 與美股 (%s: %s) 皆休市，停止執行分析。",
+                    tw_date,
+                    tw_reason,
+                    us_date,
+                    us_reason,
+                )
+                print(
+                    f"\n📅 今日台美市場皆非交易日（台股: {tw_reason}；美股: {us_reason}），停止執行分析。\n",
+                    flush=True,
+                )
+                return
+
+            if not tw_open:
+                logger.info("📅 交易日檢核：今日台股休市 (%s)，僅分析美股標的", tw_reason)
+                target_stocks = {
+                    k: v for k, v in target_stocks.items()
+                    if v.get("market") == "美國"
+                }
+            elif not us_open:
+                logger.info("📅 交易日檢核：今日美股休市 (%s)，僅分析台股標的", us_reason)
+                target_stocks = {
+                    k: v for k, v in target_stocks.items()
+                    if v.get("market") == "台灣"
+                }
+    else:
+        logger.info("⚡ 已啟用 --force 參數，跳過交易日檢核。")
 
     check_dependencies()
 
     stock_reports = []
     failed_stocks = []
 
-    for ticker, stock_info in STOCKS.items():
+    for ticker, stock_info in target_stocks.items():
         try:
             logger.info(
                 "開始處理 %s %s",
@@ -1345,11 +1641,11 @@ def run_analysis():
 
     if not stock_reports:
         raise RuntimeError(
-            "友達與 FCX 均分析失敗"
+            f"{market_label} 標的均分析失敗"
         )
 
     combined_report = (
-        "📋 每日量化技術摘要"
+        f"📋 每日量化技術摘要（{market_label}）"
         + "\n\n"
         + "\n\n━━━━━━━━━━━━━\n\n".join(
             stock_reports
@@ -1365,14 +1661,15 @@ def run_analysis():
     combined_report += (
         "\n\n📌 日期說明："
         "台股與美股交易時區不同，"
-        "兩檔股票使用各自最新完成交易日。"
+        "各檔股票使用各自最新完成交易日。"
         "\n\n⚠️ 本摘要為公開行情與技術指標整理，"
         "不構成投資建議。"
     )
 
     final_report = (
         polish_combined_report_with_gemini(
-            combined_report
+            combined_report,
+            active_stocks=target_stocks,
         )
     )
 
@@ -1393,12 +1690,31 @@ def run_analysis():
 # ============================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="每日股票量化技術分析"
+    )
+    parser.add_argument(
+        "--market",
+        choices=["tw", "us", "all"],
+        default="all",
+        help="指定分析市場：tw(台股), us(美股), all(全部)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="強制執行分析，忽略休市日與非交易日檢查",
+    )
+    cli_args = parser.parse_args()
+
     try:
-        run_analysis()
+        run_analysis(
+            market=cli_args.market,
+            force=cli_args.force,
+        )
 
     except Exception as error:
         logger.exception(
-            "雙股技術分析執行失敗"
+            "技術分析執行失敗"
         )
 
         print(
@@ -1414,7 +1730,7 @@ if __name__ == "__main__":
         )
 
         failure_message = (
-            "⚠️ 友達與FCX每日技術分析執行失敗。\n"
+            f"⚠️ {cli_args.market} 技術分析執行失敗。\n"
             f"錯誤類型：{type(error).__name__}\n"
             f"錯誤內容：{str(error)[:800]}"
         )
