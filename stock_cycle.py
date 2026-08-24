@@ -37,6 +37,13 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
+    "2408.TW": {
+        "name": "南亞科",
+        "short_name": "2408.TW",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
     "6451.TW": {
         "name": "訊芯-KY",
         "short_name": "6451.TW",
