@@ -6,6 +6,7 @@ import argparse
 import datetime
 import urllib3
 import pytz
+from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -21,6 +22,7 @@ import requests
 import yfinance as yf
 
 from google import genai
+from google.genai import types
 from google.genai import errors as genai_errors
 
 
@@ -138,8 +140,18 @@ def _load_env_file():
 _load_env_file()
 
 # Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+# 1. 強制讀取同一目錄下的 .env 檔案
+# override=True 可確保覆蓋系統中任何可能衝突的舊變數
+load_dotenv(override=True)
+
+# 2. 安全地提取並清理金鑰字串
+raw_key = os.environ.get("GEMINI_API_KEY")
+
+if not raw_key:
+    raise ValueError("系統錯誤：無法從 .env 檔案中讀取到 GEMINI_API_KEY")
+
+clean_key = raw_key.strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Telegram
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1048,7 +1060,7 @@ def polish_combined_report_with_gemini(
     失敗時直接使用 Python 原始報告。
     """
 
-    if not GEMINI_API_KEY:
+    if not clean_key:
         logger.warning(
             "未設定 GEMINI_API_KEY，"
             "直接使用 Python 原始報告"
@@ -1079,7 +1091,7 @@ def polish_combined_report_with_gemini(
 
     try:
         client = genai.Client(
-            api_key=GEMINI_API_KEY
+            api_key=clean_key
         )
 
     except Exception as error:
@@ -1102,6 +1114,12 @@ def polish_combined_report_with_gemini(
                 client.models.generate_content(
                     model=GEMINI_MODEL,
                     contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True,
+                        ),
+                    ),
                 )
             )
 
@@ -1163,11 +1181,23 @@ def polish_combined_report_with_gemini(
                 )
 
         except genai_errors.ClientError as error:
-            logger.error(
-                "Gemini 用戶端錯誤，"
-                "請檢查 API Key、模型及額度：%s",
-                repr(error),
-            )
+            err_msg = str(error)
+            if "401" in err_msg or "unauthenticated" in err_msg.lower():
+                logger.warning(
+                    "⚠️ Gemini API Key 驗證失敗 (401 UNAUTHENTICATED)。"
+                    "請確認 .env 中的 GEMINI_API_KEY 是否為 Google AI Studio 產生的合法 Key（通常以 AIzaSy 開頭）。"
+                    "已自動切換為 Python 原始報告輸出。"
+                )
+            elif "prepayment" in err_msg.lower() or "429" in err_msg or "resource_exhausted" in err_msg.lower():
+                logger.warning(
+                    "⚠️ Gemini API 額度或預付餘額已耗盡 (429 RESOURCE_EXHAUSTED)。"
+                    "自動切換為 Python 原始報告輸出（不影響分析結果與 Telegram 推送）。"
+                )
+            else:
+                logger.error(
+                    "Gemini 用戶端錯誤，請檢查 API Key、模型及額度：%s",
+                    repr(error),
+                )
 
             break
 
@@ -1647,7 +1677,7 @@ def run_analysis(market="all", force=False):
     combined_report = (
         f"📋 每日量化技術摘要（{market_label}）"
         + "\n\n"
-        + "\n\n━━━━━━━━━━━━━\n\n".join(
+        + "\n\n━━━━━━━━━━━\n\n".join(
             stock_reports
         )
     )
