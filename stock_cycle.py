@@ -73,6 +73,13 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
+    "GPRO": {
+        "name": "GoPro",
+        "short_name": "GPRO",
+        "currency": "USD",
+        "currency_label": "美元",
+        "market": "美國",
+    },
     "FCX": {
         "name": "自由港麥克莫蘭",
         "short_name": "FCX",
