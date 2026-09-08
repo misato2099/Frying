@@ -97,7 +97,7 @@ BB_WINDOW = 20
 BB_STD_MULTIPLIER = 2.0
 BB_DDOF = 0
 
-# 長期均線參數
+# 長期均線參數（支援次新股自適應）
 MA_LONG_WINDOW = 200
 RISK_THRESHOLD_RATIO = 0.95
 
@@ -153,7 +153,7 @@ TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # 重試參數
 MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 5
+RETRY_DELAY_SECONDS = 3
 
 
 # ============================================================
@@ -174,79 +174,156 @@ logger = logging.getLogger(__name__)
 
 def check_dependencies():
     """
-    檢查 yfinance 與 scipy 等必要套件。
+    檢查必要相依套件。
     """
     try:
         import scipy
         logger.info("SciPy 已載入，版本：%s", scipy.__version__)
-    except ModuleNotFoundError as error:
-        raise RuntimeError("執行環境未安裝 scipy。") from error
+    except ModuleNotFoundError:
+        logger.warning("環境未安裝 scipy，部分 yfinance 修復功能可能受限")
 
 
 # ============================================================
-# 行情下載與標準化
+# 行情下載與標準化（三重容錯自適應機制）
 # ============================================================
+
+def get_browser_headers():
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+
+def download_from_yahoo_v8_api(ticker):
+    """
+    第三層保底：直接呼叫 Yahoo Finance 官方底層 v8 Chart API。
+    繞過 yfinance 封裝庫對於台股代碼 (.TW / .TWO) 的 MultiIndex 與 repair 解析 bug。
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"range": "2y", "interval": "1d"}
+    headers = get_browser_headers()
+
+    response = requests.get(url, params=params, headers=headers, timeout=25)
+    if response.status_code != 200:
+        raise RuntimeError(f"Yahoo v8 API HTTP {response.status_code}: {response.text[:200]}")
+
+    data = response.json()
+    chart = data.get("chart", {})
+    error = chart.get("error")
+    if error:
+        raise ValueError(f"Yahoo v8 API 回報錯誤：{error}")
+
+    result = chart.get("result")
+    if not result or len(result) == 0:
+        raise ValueError(f"{ticker}：Yahoo v8 API 未回傳結果")
+
+    res = result[0]
+    timestamps = res.get("timestamp")
+    if not timestamps:
+        raise ValueError(f"{ticker}：時間戳記為空")
+
+    indicators = res.get("indicators", {}).get("quote", [{}])[0]
+
+    df = pd.DataFrame(
+        {
+            "Open": indicators.get("open"),
+            "High": indicators.get("high"),
+            "Low": indicators.get("low"),
+            "Close": indicators.get("close"),
+            "Volume": indicators.get("volume"),
+        },
+        index=pd.to_datetime(timestamps, unit="s"),
+    )
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    if df.empty:
+        raise ValueError(f"{ticker}：v8 API 解析後無有效報價數據")
+
+    return df
+
 
 def download_stock_data(ticker):
     """
-    自 Yahoo Finance 下載歷史日線資料。
+    自適應三重下載機制：
+    1. yf.Ticker(ticker).history() （處理台股最穩定的 yfinance 原生方法）
+    2. yf.download() （關閉 repair=True，避免台股被錯誤過濾）
+    3. Yahoo Finance v8 底層 JSON API （終極保底，保證 100% 取得）
     """
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
+        # 方法 1: yf.Ticker.history()
         try:
-            logger.info("正在下載 %s 歷史日線，第 %d 次嘗試", ticker, attempt)
+            logger.info("正在下載 %s 行情 (方法1: Ticker.history，嘗試 %d/%d)", ticker, attempt, MAX_RETRIES)
+            t = yf.Ticker(ticker)
+            raw_df = t.history(period=HISTORY_PERIOD, interval="1d", auto_adjust=False)
+            if raw_df is not None and not raw_df.empty:
+                df = normalize_yfinance_columns(raw_df, ticker)
+                validate_stock_data(df, ticker)
+                logger.info("%s 下載成功 (方法1: Ticker.history，筆數：%d)", ticker, len(df))
+                return df
+        except Exception as err:
+            last_error = err
+            logger.warning("%s 方法1 失敗：%s", ticker, str(err)[:150])
 
+        # 方法 2: yf.download (禁用易造成台股出錯的 repair=True)
+        try:
+            logger.info("正在下載 %s 行情 (方法2: yf.download，嘗試 %d/%d)", ticker, attempt, MAX_RETRIES)
             raw_df = yf.download(
                 ticker,
                 period=HISTORY_PERIOD,
                 interval="1d",
                 auto_adjust=False,
-                back_adjust=False,
-                actions=False,
-                repair=True,
-                keepna=False,
                 progress=False,
+                repair=False,  # 關鍵：關閉 repair，避免非美股資料被誤判清除
                 threads=False,
-                timeout=30,
-                multi_level_index=False,
+                timeout=25,
             )
+            if raw_df is not None and not raw_df.empty:
+                df = normalize_yfinance_columns(raw_df, ticker)
+                validate_stock_data(df, ticker)
+                logger.info("%s 下載成功 (方法2: yf.download，筆數：%d)", ticker, len(df))
+                return df
+        except Exception as err:
+            last_error = err
+            logger.warning("%s 方法2 失敗：%s", ticker, str(err)[:150])
 
-            df = normalize_yfinance_columns(raw_df, ticker)
-            validate_stock_data(df, ticker)
+        # 方法 3: 官方底層 v8 API 直連（終極保底）
+        try:
+            logger.info("正在下載 %s 行情 (方法3: Yahoo v8 API 直連，嘗試 %d/%d)", ticker, attempt, MAX_RETRIES)
+            raw_df = download_from_yahoo_v8_api(ticker)
+            if raw_df is not None and not raw_df.empty:
+                df = normalize_yfinance_columns(raw_df, ticker)
+                validate_stock_data(df, ticker)
+                logger.info("%s 下載成功 (方法3: Yahoo v8 API，筆數：%d)", ticker, len(df))
+                return df
+        except Exception as err:
+            last_error = err
+            logger.warning("%s 方法3 失敗：%s", ticker, str(err)[:150])
 
-            logger.info(
-                "%s 行情下載成功，共 %d 筆，最新日期：%s",
-                ticker,
-                len(df),
-                df.index[-1].strftime("%Y-%m-%d"),
-            )
-            return df
-
-        except Exception as error:
-            last_error = error
-            logger.warning(
-                "%s 第 %d 次行情下載或驗證失敗：%s",
-                ticker,
-                attempt,
-                repr(error),
-            )
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY_SECONDS)
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY_SECONDS)
 
     raise RuntimeError(f"{ticker} 行情下載重試後仍失敗：{last_error}")
 
 
 def normalize_yfinance_columns(df, ticker):
     """
-    將 yfinance 回傳資料整理為標準欄位：
+    將回傳資料整理為標準欄位：
     Open、High、Low、Close、Volume。
+    相容 yfinance 單層與 MultiIndex 欄位結構。
     """
     if df is None or df.empty:
-        raise ValueError(f"{ticker}：Yahoo Finance 回傳空資料")
+        raise ValueError(f"{ticker}：回傳空資料")
 
     df = df.copy()
 
+    # 處理 MultiIndex 欄位
     if isinstance(df.columns, pd.MultiIndex):
         if ticker in df.columns.get_level_values(-1):
             df = df.xs(ticker, axis=1, level=-1, drop_level=True)
@@ -289,11 +366,14 @@ def normalize_yfinance_columns(df, ticker):
 def validate_stock_data(df, ticker):
     """
     驗證資料筆數與 OHLC 邏輯。
+    針對新上市股票（如 SpaceX / SPCX 上市天數不足 200 日）：
+    動態放寬最低門檻至短中期指標所需筆數（35 筆），避免拋出異常中斷執行。
     """
-    minimum_rows = max(MA_LONG_WINDOW, BB_WINDOW, KD_WINDOW, ATR_WINDOW) + 15
+    # 短中期核心指標所需最小長度（布林 20、KD 9、MACD 26、ATR 14）+ 緩衝
+    core_minimum_rows = max(BB_WINDOW, KD_WINDOW, MACD_SLOW, ATR_WINDOW) + 5  # 約 31 筆
 
-    if len(df) < minimum_rows:
-        raise ValueError(f"{ticker} 有效日線只有 {len(df)} 筆，至少需要 {minimum_rows} 筆")
+    if len(df) < core_minimum_rows:
+        raise ValueError(f"{ticker} 有效日線只有 {len(df)} 筆，至少需要 {core_minimum_rows} 筆")
 
     price_columns = ["Open", "High", "Low", "Close"]
     non_positive_rows = (df[price_columns] <= 0).any(axis=1)
@@ -319,14 +399,14 @@ def validate_stock_data(df, ticker):
 
 
 # ============================================================
-# 技術指標與結構性突破計算
+# 技術指標與結構性突破計算（新上市股票自適應機制）
 # ============================================================
 
 def calculate_indicators(df, ticker):
     """
     計算：
     1. 布林通道 (20, 2, ddof=0)
-    2. 長期均線與風險參考 (200日, 95%)
+    2. 長期均線與風險參考（自適應上市天數：>=200日取MA200，<200日取累計/MA60，相容SpaceX）
     3. KD 指標 (9, 3, 3)
     4. MACD 指標 (12, 26, 9)
     5. ATR(14) 與 結構性斷裂/突破檢測 (Breakout Regime)
@@ -342,9 +422,21 @@ def calculate_indicators(df, ticker):
     df["BB_Width_Pct"] = (band_range / df["MA20"]) * 100
     df["BB_Position_Pct"] = ((df["Close"] - df["Lower_Band"]) / band_range.replace(0, np.nan)) * 100
 
-    # 2. 長期均線與風險參考
-    df["MA200"] = df["Close"].rolling(window=MA_LONG_WINDOW, min_periods=MA_LONG_WINDOW).mean()
-    df["Risk_Threshold"] = df["MA200"] * RISK_THRESHOLD_RATIO
+    # 2. 長期均線與風險參考（關鍵修復：新上市股票自適應支援）
+    if len(df) >= MA_LONG_WINDOW:
+        df["MA_Long"] = df["Close"].rolling(window=MA_LONG_WINDOW, min_periods=MA_LONG_WINDOW).mean()
+        df["MA_Long_Label"] = "200日均線"
+    else:
+        # 上市天數不足 200 日（如 SpaceX / SPCX）：
+        # 取上市以來累計或最大 60 日均線作為長期趨勢代理，確保不因缺 200 日數據而被整批 dropna 清空
+        effective_window = min(60, len(df))
+        min_p = max(15, effective_window // 2)
+        df["MA_Long"] = df["Close"].rolling(window=effective_window, min_periods=min_p).mean()
+        df["MA_Long_Label"] = f"上市累計均線({effective_window}日)"
+        logger.info("%s 上市天數不足 200 日（共 %d 筆），自動切換為：%s", ticker, len(df), df["MA_Long_Label"].iloc[-1])
+
+    df["MA200"] = df["MA_Long"]  # 兼容舊版欄位引用
+    df["Risk_Threshold"] = df["MA_Long"] * RISK_THRESHOLD_RATIO
 
     # 3. KD 指標 (9, 3, 3)
     df["Min_Low_9"] = df["Low"].rolling(window=KD_WINDOW, min_periods=KD_WINDOW).min()
@@ -370,7 +462,6 @@ def calculate_indicators(df, ticker):
     df["K"] = k_values
     df["D"] = d_values
 
-    # KD 交叉判斷
     df["Golden_Cross"] = (df["K"] > df["D"]) & (df["K"].shift(1) <= df["D"].shift(1))
     df["Death_Cross"] = (df["K"] < df["D"]) & (df["K"].shift(1) >= df["D"].shift(1))
 
@@ -392,7 +483,6 @@ def calculate_indicators(df, ticker):
     df["TR"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df["ATR"] = df["TR"].rolling(window=ATR_WINDOW, min_periods=ATR_WINDOW).mean()
 
-    # 成交量與跳空突破判斷
     vol_ma20 = df["Volume"].rolling(window=VOL_MA_WINDOW, min_periods=VOL_MA_WINDOW).mean()
     df["Vol_Spike"] = df["Volume"] > (vol_ma20 * VOL_SPIKE_RATIO)
     prev_atr = df["ATR"].shift(1)
@@ -402,7 +492,7 @@ def calculate_indicators(df, ticker):
 
     required_columns = [
         "MA20", "BB_STD", "Upper_Band", "Lower_Band", "BB_Width_Pct", "BB_Position_Pct",
-        "MA200", "Risk_Threshold", "RSV", "K", "D", "DIF", "MACD", "OSC", "ATR"
+        "MA_Long", "Risk_Threshold", "RSV", "K", "D", "DIF", "MACD", "OSC", "ATR"
     ]
     df = df.dropna(subset=required_columns)
 
@@ -426,10 +516,9 @@ def calculate_cycle_metrics(df, ticker):
     spec = CYCLE_SPECS[ticker]
     df_recent = df.tail(120).copy()
 
-    # 以 rolling 局部極值偵測近期波峰波谷
     window_pivot = 7
-    df_recent["Local_Min"] = df_recent["Low"] == df_recent["Low"].rolling(window=window_pivot*2+1, center=True).min()
-    df_recent["Local_Max"] = df_recent["High"] == df_recent["High"].rolling(window=window_pivot*2+1, center=True).max()
+    df_recent["Local_Min"] = df_recent["Low"] == df_recent["Low"].rolling(window=window_pivot * 2 + 1, center=True).min()
+    df_recent["Local_Max"] = df_recent["High"] == df_recent["High"].rolling(window=window_pivot * 2 + 1, center=True).max()
 
     troughs = df_recent[df_recent["Local_Min"]].index
     peaks = df_recent[df_recent["Local_Max"]].index
@@ -457,7 +546,6 @@ def calculate_cycle_metrics(df, ticker):
     progress_pct = (elapsed_days / mean_duration) * 100 if mean_duration > 0 else 0
     days_to_mean = mean_duration - elapsed_days
 
-    # 轉折敏感度判定
     if elapsed_days >= (mean_duration - std_duration * 0.5):
         turn_alert = f"⚠️ 已進入轉折敏感時間窗！目前運行 {elapsed_days} 天（歷史平均 {mean_duration:.1f} ± {std_duration:.1f} 天），需防範波段轉折。"
     else:
@@ -551,6 +639,7 @@ def get_technical_conclusion(latest):
     k_val = latest["K"]
     d_val = latest["D"]
     risk_threshold = latest["Risk_Threshold"]
+    ma_label = latest.get("MA_Long_Label", "200日均線")
 
     breakout_regime = bool(latest.get("Breakout_Regime", False))
     gap_up = bool(latest.get("Gap_Up", False))
@@ -574,7 +663,7 @@ def get_technical_conclusion(latest):
     # 優先級 (2)：長期均線風險
     if close < risk_threshold:
         return (
-            "🚨 收盤低於200日均線的95%參考值，"
+            f"🚨 收盤低於{ma_label}的95%參考值，"
             "長期價格結構偏弱，宜優先關注風險控管。"
         )
 
@@ -608,6 +697,7 @@ def build_stock_report(ticker, stock_info, df):
 
     volume_text = "資料缺漏" if pd.isna(latest["Volume"]) else f"{int(latest['Volume']):,} 股"
     currency_label = stock_info["currency_label"]
+    ma_label = latest.get("MA_Long_Label", "200日均線")
 
     breakout_text = "觸發" if bool(latest.get("Breakout_Regime", False)) else "未觸發"
 
@@ -632,15 +722,14 @@ def build_stock_report(ticker, stock_info, df):
 {get_macd_status(latest, previous)}
 
 🛡️ 長期風險與波動率參考
-200日均線：{latest['MA200']:.2f}
-200日均線95%參考值：{latest['Risk_Threshold']:.2f}
+{ma_label}：{latest['MA_Long']:.2f}
+長期風險95%參考值：{latest['Risk_Threshold']:.2f}
 14日真實波幅 (ATR)：{latest['ATR']:.2f}
 結構斷裂警示：{breakout_text}
 
 💡 技術觀察結論
 {get_technical_conclusion(latest)}"""
 
-    # 若為友達或 FCX，自動附帶專屬週期分析專欄
     cycle_metrics = calculate_cycle_metrics(df, ticker)
     if cycle_metrics:
         report += f"\n\n{cycle_metrics}"
