@@ -143,9 +143,12 @@ CYCLE_SPECS = {
     },
 }
 
+# Telegram 訊息上限設定（官方上限為 4096，保留安全緩衝區設為 3800）
+MAX_TG_MESSAGE_LENGTH = 3800
+
 # Gemini 設定
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 
 # Telegram 設定
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -280,7 +283,7 @@ def download_stock_data(ticker):
                 interval="1d",
                 auto_adjust=False,
                 progress=False,
-                repair=False,  # 關鍵：關閉 repair，避免非美股資料被誤判清除
+                repair=False,
                 threads=False,
                 timeout=25,
             )
@@ -323,7 +326,6 @@ def normalize_yfinance_columns(df, ticker):
 
     df = df.copy()
 
-    # 處理 MultiIndex 欄位
     if isinstance(df.columns, pd.MultiIndex):
         if ticker in df.columns.get_level_values(-1):
             df = df.xs(ticker, axis=1, level=-1, drop_level=True)
@@ -369,7 +371,6 @@ def validate_stock_data(df, ticker):
     針對新上市股票（如 SpaceX / SPCX 上市天數不足 200 日）：
     動態放寬最低門檻至短中期指標所需筆數（35 筆），避免拋出異常中斷執行。
     """
-    # 短中期核心指標所需最小長度（布林 20、KD 9、MACD 26、ATR 14）+ 緩衝
     core_minimum_rows = max(BB_WINDOW, KD_WINDOW, MACD_SLOW, ATR_WINDOW) + 5  # 約 31 筆
 
     if len(df) < core_minimum_rows:
@@ -422,20 +423,18 @@ def calculate_indicators(df, ticker):
     df["BB_Width_Pct"] = (band_range / df["MA20"]) * 100
     df["BB_Position_Pct"] = ((df["Close"] - df["Lower_Band"]) / band_range.replace(0, np.nan)) * 100
 
-    # 2. 長期均線與風險參考（關鍵修復：新上市股票自適應支援）
+    # 2. 長期均線與風險參考（次新股自適應支援）
     if len(df) >= MA_LONG_WINDOW:
         df["MA_Long"] = df["Close"].rolling(window=MA_LONG_WINDOW, min_periods=MA_LONG_WINDOW).mean()
         df["MA_Long_Label"] = "200日均線"
     else:
-        # 上市天數不足 200 日（如 SpaceX / SPCX）：
-        # 取上市以來累計或最大 60 日均線作為長期趨勢代理，確保不因缺 200 日數據而被整批 dropna 清空
         effective_window = min(60, len(df))
         min_p = max(15, effective_window // 2)
         df["MA_Long"] = df["Close"].rolling(window=effective_window, min_periods=min_p).mean()
         df["MA_Long_Label"] = f"上市累計均線({effective_window}日)"
         logger.info("%s 上市天數不足 200 日（共 %d 筆），自動切換為：%s", ticker, len(df), df["MA_Long_Label"].iloc[-1])
 
-    df["MA200"] = df["MA_Long"]  # 兼容舊版欄位引用
+    df["MA200"] = df["MA_Long"]
     df["Risk_Threshold"] = df["MA_Long"] * RISK_THRESHOLD_RATIO
 
     # 3. KD 指標 (9, 3, 3)
@@ -645,7 +644,6 @@ def get_technical_conclusion(latest):
     gap_up = bool(latest.get("Gap_Up", False))
     gap_down = bool(latest.get("Gap_Down", False))
 
-    # 優先級 (1)：結構性突破 / 斷裂
     if breakout_regime:
         if gap_up:
             return (
@@ -660,14 +658,12 @@ def get_technical_conclusion(latest):
                 "應優先審視基本面變數，並嚴格執行風險價值控管機制。"
             )
 
-    # 優先級 (2)：長期均線風險
     if close < risk_threshold:
         return (
             f"🚨 收盤低於{ma_label}的95%參考值，"
             "長期價格結構偏弱，宜優先關注風險控管。"
         )
 
-    # 優先級 (3)：常規技術訊號
     if close > upper and k_val > d_val and k_val >= 80:
         return "🟠 價格突破布林上軌且KD偏多，但K值已進入超買區，短線乖離及震盪風險上升。"
     if close < lower and k_val < d_val and k_val <= 20:
@@ -738,7 +734,7 @@ def build_stock_report(ticker, stock_info, df):
 
 
 # ============================================================
-# Gemini 潤飾與 Telegram 推播
+# Gemini 潤飾與 Telegram 自動分段推播
 # ============================================================
 
 def polish_combined_report_with_gemini(base_report):
@@ -770,21 +766,76 @@ def polish_combined_report_with_gemini(base_report):
         return base_report
 
 
+def split_tg_message(text, max_len=MAX_TG_MESSAGE_LENGTH):
+    """
+    智能切分過長訊息（Telegram 單則上限 4096 字元），
+    優先依據分隔線或換行符切分，避免在文字中間截斷。
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    delimiter = "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if delimiter in text:
+        parts = text.split(delimiter)
+        current_chunk = ""
+        for i, part in enumerate(parts):
+            piece = part if i == 0 else delimiter + part
+            if len(current_chunk) + len(piece) <= max_len:
+                current_chunk += piece
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = part
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        if all(len(c) <= max_len for c in chunks):
+            return chunks
+
+    # 若單段仍然過長，改依換行符切割
+    lines = text.split("\n")
+    current_chunk = ""
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 <= max_len:
+            current_chunk += line + "\n"
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = line + "\n"
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
 def send_tg_message(message):
+    """
+    發送 Telegram 訊息，自動分段發送超過 4096 字元之超長報告。
+    """
     if not TG_TOKEN or not TG_CHAT_ID:
         logger.warning("未設定 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，跳過 Telegram 發送")
         return
 
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True,
-    }
-    response = requests.post(url, json=payload, timeout=30)
-    if response.status_code != 200:
-        raise RuntimeError(f"Telegram 發送失敗，HTTP {response.status_code}：{response.text[:500]}")
-    logger.info("Telegram 報告已成功發送")
+    chunks = split_tg_message(message)
+    total_chunks = len(chunks)
+
+    for idx, chunk in enumerate(chunks, 1):
+        payload = {
+            "chat_id": TG_CHAT_ID,
+            "text": chunk,
+            "disable_web_page_preview": True,
+        }
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Telegram 發送失敗（第 {idx}/{total_chunks} 則），HTTP {response.status_code}：{response.text[:500]}"
+            )
+        logger.info("Telegram 報告第 %d/%d 則已成功發送", idx, total_chunks)
+        if idx < total_chunks:
+            time.sleep(0.5)  # 避免觸發 Telegram 頻率限制
 
 
 # ============================================================
