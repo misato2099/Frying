@@ -145,7 +145,7 @@ CYCLE_SPECS = {
 
 # Gemini 設定
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 
 # Telegram 設定
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
