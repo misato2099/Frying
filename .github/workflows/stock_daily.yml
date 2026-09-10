@@ -2,32 +2,42 @@ name: 每日股票量化技術分析
 
 on:
   schedule:
-    # 週一至週五 UTC 00:00 (台灣時間 08:00) 執行台股
+    # 1. 週一至週五 UTC 00:00 (台灣時間 08:00) 執行台股
     - cron: '0 0 * * 1-5'
-    # 週一至週五 UTC 13:00 (台灣時間 21:00) 執行美股
+    # 2. 週一至週五 UTC 06:30 (台灣時間 14:30 / 歐洲夏令時間 08:30) 執行歐股開市前分析
+    - cron: '30 6 * * 1-5'
+    # 3. 週一至週五 UTC 13:00 (台灣時間 21:00) 執行美股開市前分析
     - cron: '0 13 * * 1-5'
   
-  # 支援在 GitHub 網頁手動點擊「Run workflow」隨時測試
+  # 支援在 GitHub 網頁手動點擊「Run workflow」隨時指定市場測試
   workflow_dispatch:
     inputs:
       market:
-        description: '選擇要分析的市場'
+        description: '選擇要分析的市場 (tw: 台股, eu: 歐股, us: 美股, all: 全部)'
         required: true
         default: 'all'
         type: choice
         options:
           - tw
+          - eu
           - us
           - all
       force:
-        description: '是否強制執行（略過假日檢核）'
+        description: '是否強制執行（略過假日/週末檢核）'
         required: false
         default: false
         type: boolean
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   run-analysis:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
 
     steps:
       - name: 檢出專案代碼
@@ -42,33 +52,61 @@ jobs:
       - name: 安裝相依套件
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install yfinance pandas numpy requests scipy google-genai
+          fi
 
       - name: 判斷執行市場並啟動分析
         env:
+          PYTHONUNBUFFERED: "1"
+          TZ: "Asia/Taipei"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # 取得觸發時的 UTC 小時
-          HOUR=$(date -u +%H)
+          set -e
+
+          # 取得觸發當下的 UTC 小時（%-H 去除前導零）
+          HOUR=$(date -u +%-H)
           
-          # 預設依排程時間分流：UTC 00點(台灣08點)跑台股，UTC 13點(台灣21點)跑美股
+          # 預設依排程時間三階段自動分流：
+          # UTC 00:00 (台灣 08:00) ➔ 台股 (tw)
+          # UTC 06:30 (台灣 14:30) ➔ 歐股 (eu)
+          # UTC 13:00 (台灣 21:00) ➔ 美股 (us)
           TARGET_MARKET="tw"
-          if [ "$HOUR" -ge "10" ]; then
+          if [ "$HOUR" -ge 5 ] && [ "$HOUR" -le 9 ]; then
+            TARGET_MARKET="eu"
+          elif [ "$HOUR" -ge 10 ]; then
             TARGET_MARKET="us"
           fi
           
-          # 若是手動點擊觸發，則使用手動選擇的市場
+          # 若是手動點擊觸發，則直接覆蓋為手動選定的市場
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TARGET_MARKET="${{ github.event.inputs.market }}"
+            TARGET_MARKET="${{ inputs.market }}"
           fi
 
-          # 檢查是否有勾選 force
+          # 檢查是否帶入 --force 參數
           EXTRA_FLAGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+          if [ "${{ inputs.force }}" = "true" ]; then
             EXTRA_FLAGS="--force"
           fi
 
-          echo "🚀 開始執行分析市場: $TARGET_MARKET (UTC Hour: $HOUR)"
+          echo "=================================================="
+          echo "🚀 觸發事件: ${{ github.event_name }}"
+          echo "🕒 當前 UTC 小時: $HOUR"
+          echo "🎯 目標分析市場: $TARGET_MARKET"
+          echo "⚙️ 額外參數: $EXTRA_FLAGS"
+          echo "=================================================="
+
           python stock_cycle.py --market "$TARGET_MARKET" $EXTRA_FLAGS
+
+      - name: 上傳計算結果 CSV 為 Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-calculation-csv
+          path: "*_calculation.csv"
+          retention-days: 7
+          if-no-files-found: ignore
