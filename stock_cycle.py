@@ -61,7 +61,7 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
-    # ---------------- 歐股標的 (可依需求新增/擴充) ----------------
+    # ---------------- 歐股標的 ----------------
     "ASML.AS": {
         "name": "艾司摩爾",
         "short_name": "ASML",
@@ -135,7 +135,7 @@ VOL_SPIKE_RATIO = 2.5
 GAP_ATR_RATIO = 1.0
 
 # ------------------------------------------------------------
-# 專屬週期分析設定（友達 2409.TW 與 FCX）
+# 專屬週期分析設定（友達 2409.TW、FCX、TKA.DE、ASML.AS）
 # ------------------------------------------------------------
 CYCLE_SPECS = {
     "2409.TW": {
@@ -158,6 +158,26 @@ CYCLE_SPECS = {
         "peak_to_peak_std": 15.0,
         "industry_notes": "LME/COMEX全球銅庫存水位、銅精礦加工費(TC/RC)、AI資料中心與電網電氣化長期結構性供需。",
     },
+    "TKA.DE": {
+        "title": "蒂森克虜伯 (TKA.DE) 專屬鋼鐵重工與景氣週期量化分析",
+        "up_cycle_mean": 48.0,
+        "up_cycle_std": 16.5,
+        "down_cycle_mean": 38.0,
+        "down_cycle_std": 8.5,
+        "peak_to_peak_mean": 86.0,
+        "peak_to_peak_std": 18.0,
+        "industry_notes": "歐洲鋼鐵現貨報價、車用與工程重工鋼材需求、TKMS防務海事分拆獨立上市與綠色氫能減碳轉型。",
+    },
+    "ASML.AS": {
+        "title": "艾司摩爾 (ASML.AS) 專屬半導體資本支出與設備週期量化分析",
+        "up_cycle_mean": 56.0,
+        "up_cycle_std": 15.0,
+        "down_cycle_mean": 42.0,
+        "down_cycle_std": 12.0,
+        "peak_to_peak_mean": 98.0,
+        "peak_to_peak_std": 20.0,
+        "industry_notes": "先進製程EUV/High-NA微影設備淨新增訂單(Net Bookings)、全球晶圓代工與記憶體資本支出(CapEx)週期、中國市場DUV出貨監管動態。",
+    },
 }
 
 # Telegram 訊息上限設定（官方上限為 4096，保留安全緩衝區設為 3800）
@@ -165,7 +185,7 @@ MAX_TG_MESSAGE_LENGTH = 3800
 
 # Gemini 設定
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 
 # Telegram 設定
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -215,14 +235,14 @@ def get_browser_headers():
             "Chrome/122.0.0.0 Safari/537.36"
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,de;q=0.7,nl;q=0.7",
     }
 
 
 def download_from_yahoo_v8_api(ticker):
     """
     第三層保底：直接呼叫 Yahoo Finance 官方底層 v8 Chart API。
-    繞過 yfinance 封裝庫對於國際代碼 (.TW / .TWO / .AS / .DE / .L) 的解析 bug。
+    繞過 yfinance 封裝庫對於國際代碼 (.TW / .TWO / .AS / .DE) 的解析 bug。
     """
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     params = {"range": "2y", "interval": "1d"}
@@ -519,7 +539,7 @@ def calculate_indicators(df, ticker):
 
 
 # ============================================================
-# 週期與時間窗口量化分析模組（友達與 FCX 專屬）
+# 週期與時間窗口量化分析模組（友達、FCX、TKA.DE、ASML.AS 專屬）
 # ============================================================
 
 def calculate_cycle_metrics(df, ticker):
@@ -743,11 +763,31 @@ def build_stock_report(ticker, stock_info, df):
 💡 技術觀察結論
 {get_technical_conclusion(latest)}"""
 
+    # 若為友達 (2409.TW)、FCX、TKA.DE、ASML.AS，自動附帶專屬週期分析專欄
     cycle_metrics = calculate_cycle_metrics(df, ticker)
     if cycle_metrics:
         report += f"\n\n{cycle_metrics}"
 
     return report
+
+
+# ============================================================
+# 儲存計算明細 CSV
+# ============================================================
+
+def save_calculation_result(ticker, df):
+    output_columns = [
+        "Open", "High", "Low", "Close", "Volume",
+        "MA20", "BB_STD", "Upper_Band", "Lower_Band", "BB_Width_Pct", "BB_Position_Pct",
+        "MA_Long", "Risk_Threshold", "Min_Low_9", "Max_High_9", "RSV", "K", "D",
+        "DIF", "MACD", "OSC", "ATR", "Vol_Spike", "Breakout_Regime"
+    ]
+    avail_cols = [c for c in output_columns if c in df.columns]
+    output_df = df[avail_cols].tail(60).copy()
+    safe_ticker = ticker.replace(".", "_")
+    filename = f"{safe_ticker}_calculation.csv"
+    output_df.to_csv(filename, encoding="utf-8-sig", index_label="Date", float_format="%.4f")
+    logger.info("%s 計算明細已儲存：%s", ticker, filename)
 
 
 # ============================================================
@@ -765,7 +805,7 @@ def polish_combined_report_with_gemini(base_report):
 1. 不得修改任何日期或數值。
 2. 不得重新計算指標。
 3. 不得增加目標價、停損價或保證指令。
-4. 必須保留各標的交易日期與週期分析專欄。
+4. 必須完整保留友達 (2409.TW)、自由港 (FCX)、蒂森克虜伯 (TKA.DE)、艾司摩爾 (ASML.AS) 的【專屬週期與時間窗口量化分析】區塊，不得刪減或省略！
 5. 使用台灣繁體中文，僅改善文字流暢度及排版。
 
 原始報告：
@@ -924,6 +964,7 @@ def run_analysis(market="all", force=False):
             logger.info("處理標的：%s (%s)", stock_info["name"], ticker)
             df = download_stock_data(ticker)
             df = calculate_indicators(df, ticker)
+            save_calculation_result(ticker, df)
             report = build_stock_report(ticker, stock_info, df)
             stock_reports.append(report)
         except Exception as error:
