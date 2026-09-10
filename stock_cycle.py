@@ -69,6 +69,13 @@ STOCKS = {
         "currency_label": "歐元",
         "market": "歐洲",
     },
+    "TKA.DE": {
+        "name": "蒂森克虜伯",
+        "short_name": "TKA",
+        "currency": "EUR",
+        "currency_label": "歐元",
+        "market": "歐洲",
+    },
     # ---------------- 美股標的 ----------------
     "FCX": {
         "name": "自由港麥克莫蘭",
