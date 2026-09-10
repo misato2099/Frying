@@ -88,6 +88,14 @@ STOCKS = {
         "currency_label": "美元",
         "market": "美國",
     },
+    # ---------------- 歐股標的 ----------------
+    "TKA.DE": {
+        "name": "蒂森克虜伯",
+        "short_name": "TKA.DE",
+        "currency": "EUR",
+        "currency_label": "歐元",
+        "market": "歐洲",
+    },
 }
 
 HISTORY_PERIOD = "2y"
@@ -140,6 +148,16 @@ CYCLE_SPECS = {
         "peak_to_peak_mean": 88.0,
         "peak_to_peak_std": 15.0,
         "industry_notes": "LME/COMEX全球銅庫存水位、銅精礦加工費(TC/RC)、AI資料中心與電網電氣化長期結構性供需。",
+    },
+    "TKA.DE": {
+        "title": "蒂森克虜伯 (TKA.DE) 專屬重組與鋼鐵週期分析",
+        "up_cycle_mean": 60.8,
+        "up_cycle_std": 16.2,
+        "down_cycle_mean": 46.7,
+        "down_cycle_std": 22.6,
+        "peak_to_peak_mean": 111.3,
+        "peak_to_peak_std": 8.0,
+        "industry_notes": "歐洲鋼鐵季度合約、TKMS海軍造船業務拆分、綠色鋼鐵減碳補貼與工會談判進程。",
     },
 }
 
