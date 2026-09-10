@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 import logging
+import argparse
 
 import numpy as np
 import pandas as pd
@@ -59,6 +61,14 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
+    # ---------------- 歐股標的 (可依需求新增/擴充) ----------------
+    "ASML.AS": {
+        "name": "艾司摩爾",
+        "short_name": "ASML",
+        "currency": "EUR",
+        "currency_label": "歐元",
+        "market": "歐洲",
+    },
     # ---------------- 美股標的 ----------------
     "FCX": {
         "name": "自由港麥克莫蘭",
@@ -87,14 +97,6 @@ STOCKS = {
         "currency": "USD",
         "currency_label": "美元",
         "market": "美國",
-    },
-    # ---------------- 歐股標的 ----------------
-    "TKA.DE": {
-        "name": "蒂森克虜伯",
-        "short_name": "TKA.DE",
-        "currency": "EUR",
-        "currency_label": "歐元",
-        "market": "歐洲",
     },
 }
 
@@ -149,16 +151,6 @@ CYCLE_SPECS = {
         "peak_to_peak_std": 15.0,
         "industry_notes": "LME/COMEX全球銅庫存水位、銅精礦加工費(TC/RC)、AI資料中心與電網電氣化長期結構性供需。",
     },
-    "TKA.DE": {
-        "title": "蒂森克虜伯 (TKA.DE) 專屬重組與鋼鐵週期分析",
-        "up_cycle_mean": 60.8,
-        "up_cycle_std": 16.2,
-        "down_cycle_mean": 46.7,
-        "down_cycle_std": 22.6,
-        "peak_to_peak_mean": 111.3,
-        "peak_to_peak_std": 8.0,
-        "industry_notes": "歐洲鋼鐵季度合約、TKMS海軍造船業務拆分、綠色鋼鐵減碳補貼與工會談判進程。",
-    },
 }
 
 # Telegram 訊息上限設定（官方上限為 4096，保留安全緩衝區設為 3800）
@@ -166,7 +158,7 @@ MAX_TG_MESSAGE_LENGTH = 3800
 
 # Gemini 設定
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # Telegram 設定
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -223,7 +215,7 @@ def get_browser_headers():
 def download_from_yahoo_v8_api(ticker):
     """
     第三層保底：直接呼叫 Yahoo Finance 官方底層 v8 Chart API。
-    繞過 yfinance 封裝庫對於台股代碼 (.TW / .TWO) 的 MultiIndex 與 repair 解析 bug。
+    繞過 yfinance 封裝庫對於國際代碼 (.TW / .TWO / .AS / .DE / .L) 的解析 bug。
     """
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     params = {"range": "2y", "interval": "1d"}
@@ -271,8 +263,8 @@ def download_from_yahoo_v8_api(ticker):
 def download_stock_data(ticker):
     """
     自適應三重下載機制：
-    1. yf.Ticker(ticker).history() （處理台股最穩定的 yfinance 原生方法）
-    2. yf.download() （關閉 repair=True，避免台股被錯誤過濾）
+    1. yf.Ticker(ticker).history() （處理台股與歐股最穩定的 yfinance 原生方法）
+    2. yf.download() （關閉 repair=True，避免國際股票被錯誤過濾）
     3. Yahoo Finance v8 底層 JSON API （終極保底，保證 100% 取得）
     """
     last_error = None
@@ -292,7 +284,7 @@ def download_stock_data(ticker):
             last_error = err
             logger.warning("%s 方法1 失敗：%s", ticker, str(err)[:150])
 
-        # 方法 2: yf.download (禁用易造成台股出錯的 repair=True)
+        # 方法 2: yf.download (禁用易造成非美股出錯的 repair=True)
         try:
             logger.info("正在下載 %s 行情 (方法2: yf.download，嘗試 %d/%d)", ticker, attempt, MAX_RETRIES)
             raw_df = yf.download(
@@ -389,7 +381,7 @@ def validate_stock_data(df, ticker):
     針對新上市股票（如 SpaceX / SPCX 上市天數不足 200 日）：
     動態放寬最低門檻至短中期指標所需筆數（35 筆），避免拋出異常中斷執行。
     """
-    core_minimum_rows = max(BB_WINDOW, KD_WINDOW, MACD_SLOW, ATR_WINDOW) + 5  # 約 31 筆
+    core_minimum_rows = max(BB_WINDOW, KD_WINDOW, MACD_SLOW, ATR_WINDOW) + 5
 
     if len(df) < core_minimum_rows:
         raise ValueError(f"{ticker} 有效日線只有 {len(df)} 筆，至少需要 {core_minimum_rows} 筆")
@@ -812,7 +804,6 @@ def split_tg_message(text, max_len=MAX_TG_MESSAGE_LENGTH):
         if all(len(c) <= max_len for c in chunks):
             return chunks
 
-    # 若單段仍然過長，改依換行符切割
     lines = text.split("\n")
     current_chunk = ""
     for line in lines:
@@ -853,18 +844,55 @@ def send_tg_message(message):
             )
         logger.info("Telegram 報告第 %d/%d 則已成功發送", idx, total_chunks)
         if idx < total_chunks:
-            time.sleep(0.5)  # 避免觸發 Telegram 頻率限制
+            time.sleep(0.5)
 
 
 # ============================================================
-# 主程式入口
+# 主程式入口（支援 CLI --market [tw/eu/us/all] 與 --force）
 # ============================================================
 
-def run_analysis(market_filter=None):
+MARKET_MAP = {
+    "tw": "台灣",
+    "台灣": "台灣",
+    "eu": "歐洲",
+    "歐洲": "歐洲",
+    "us": "美國",
+    "美國": "美國",
+    "all": None,
+    "全部": None,
+}
+
+
+def run_analysis(market="all", force=False):
     """
-    可指定 market_filter: '台灣' 僅分析台股，'美國' 僅分析美股，None 分析全部。
+    執行指定市場分析：
+    market: 'tw' (台股), 'eu' (歐股), 'us' (美股), 'all' (全球市場)
+    force: 是否略過假日檢核
     """
     check_dependencies()
+
+    market_key = str(market).lower().strip()
+    market_filter = MARKET_MAP.get(market_key, None)
+
+    # 週末與假日快速過濾（若未啟用 --force）
+    if not force:
+        now_utc = pd.Timestamp.now(tz="UTC")
+        if market_filter == "台灣":
+            now_local = now_utc.tz_convert("Asia/Taipei")
+        elif market_filter == "歐洲":
+            now_local = now_utc.tz_convert("Europe/Berlin")
+        else:
+            now_local = now_utc.tz_convert("America/New_York")
+
+        weekday = now_local.weekday()  # 5=Sat, 6=Sun
+        if weekday in [5, 6]:
+            logger.info(
+                "今天是週末（%s，星期%d），依常規跳過排程分析。若需手動測試請帶入 --force 參數。",
+                now_local.strftime("%Y-%m-%d"),
+                weekday + 1,
+            )
+            return
+
     stock_reports = []
     failed_stocks = []
 
@@ -873,7 +901,16 @@ def run_analysis(market_filter=None):
         if market_filter is None or v.get("market") == market_filter
     }
 
-    logger.info("開始執行量化技術分析，目標標的共 %d 檔", len(target_stocks))
+    if market_filter == "台灣":
+        market_label = "台股"
+    elif market_filter == "歐洲":
+        market_label = "歐股"
+    elif market_filter == "美國":
+        market_label = "美股"
+    else:
+        market_label = "多市場"
+
+    logger.info("開始執行 %s 量化技術分析，目標標的共 %d 檔", market_label, len(target_stocks))
 
     for ticker, stock_info in target_stocks.items():
         try:
@@ -887,17 +924,17 @@ def run_analysis(market_filter=None):
             failed_stocks.append(f"{ticker}：{type(error).__name__}，{str(error)[:200]}")
 
     if not stock_reports:
-        raise RuntimeError("所有標的均分析失敗")
+        raise RuntimeError(f"{market_label} 所有標的均分析失敗")
 
     combined_report = (
-        "📋 每日雙市場量化技術與週期摘要報告\n\n"
+        f"📋 每日{market_label}量化技術與週期摘要報告\n\n"
         + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n".join(stock_reports)
     )
 
     if failed_stocks:
         combined_report += "\n\n⚠️ 部分標的分析失敗：\n" + "\n".join(failed_stocks)
 
-    combined_report += "\n\n📌 註：台股與美股時區不同，各標的均採用最新已結算完成交易日。本摘要為公開數據之量化模型計算，不構成投資建議。"
+    combined_report += "\n\n📌 註：台股、歐股與美股時區不同，各標的均採用最新已結算完成交易日。本摘要為公開數據之量化模型計算，不構成投資建議。"
 
     final_report = polish_combined_report_with_gemini(combined_report)
     print("\n" + final_report + "\n", flush=True)
@@ -909,8 +946,24 @@ def run_analysis(market_filter=None):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="每日股票量化技術分析與週期監控")
+    parser.add_argument(
+        "--market",
+        choices=["tw", "eu", "us", "all", "台灣", "歐洲", "美國", "全部"],
+        default="all",
+        help="選擇要分析的市場 (tw: 台股, eu: 歐股, us: 美股, all: 全部)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="是否強制執行（略過週末/休市檢核）",
+    )
+
+    args = parser.parse_args()
+
     try:
-        run_analysis()
+        run_analysis(market=args.market, force=args.force)
     except Exception as error:
         logger.exception("量化技術分析執行失敗：%s", repr(error))
+        sys.exit(1)
 
