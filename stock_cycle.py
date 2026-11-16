@@ -26,6 +26,13 @@ STOCKS = {
         "currency_label": "元",
         "market": "台灣",
     },
+    "2059.TW": {
+        "name": "川湖",
+        "short_name": "川湖",
+        "currency": "TWD",
+        "currency_label": "元",
+        "market": "台灣",
+    },
     "6285.TW": {
         "name": "啟碁科技",
         "short_name": "啟碁",
